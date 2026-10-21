@@ -1,0 +1,1091 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>CHaRM Live Check-In</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page-plane:     #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;
+    --good:           #0ca30c;
+    --critical:       #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page-plane:     #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --good:           #0ca30c;
+      --critical:       #e66767;
+    }
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    background: var(--page-plane);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-primary);
+    font-size: 16px;
+  }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 16px 16px 140px; }
+  .hidden { display: none !important; }
+
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  p.muted { color: var(--text-secondary); font-size: 14px; margin: 0; }
+  .required-mark { color: var(--critical); }
+
+  /* Cards */
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 14px;
+  }
+
+  /* Form fields */
+  label { display: block; font-size: 13.5px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+  input[type="text"], input[type="date"], input[type="number"], select {
+    width: 100%;
+    font-size: 17px;
+    padding: 13px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--surface-1);
+    color: var(--text-primary);
+    min-height: 50px;
+  }
+  input:focus, select:focus { outline: 2px solid var(--series-1); outline-offset: 1px; }
+  .field { margin-bottom: 16px; }
+
+  button {
+    font-family: inherit;
+    cursor: pointer;
+    border: none;
+    border-radius: 9px;
+  }
+  .btn-primary {
+    background: var(--series-1);
+    color: #fff;
+    font-size: 18px;
+    font-weight: 600;
+    padding: 16px;
+    width: 100%;
+    min-height: 56px;
+  }
+  .btn-secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-size: 15px;
+    padding: 10px 14px;
+    min-height: 44px;
+  }
+  .btn-danger {
+    background: var(--critical);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 12px 16px;
+    min-height: 48px;
+  }
+  .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-link {
+    background: none;
+    color: var(--series-1);
+    font-size: 14px;
+    padding: 4px 0;
+    text-decoration: underline;
+  }
+  .btn-icon-sm {
+    background: transparent;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    padding: 6px 10px;
+    min-height: 34px;
+  }
+
+  /* Header */
+  .event-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .vehicle-count-badge {
+    margin-top: 10px;
+    font-size: 30px;
+    font-weight: 700;
+  }
+  .lbl { font-size: 13px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 2px; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 8px; margin: 14px 0 16px; }
+  .tab-btn {
+    flex: 1;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 14.5px;
+    font-weight: 600;
+    padding: 10px;
+    min-height: 42px;
+  }
+  .tab-btn.active { background: var(--series-1); color: #fff; border-color: var(--series-1); }
+
+  /* ZIP suggestions */
+  .zip-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .zip-chip {
+    background: var(--page-plane); border: 1px solid var(--border); border-radius: 16px;
+    padding: 7px 12px; font-size: 13.5px; color: var(--text-primary); min-height: 32px;
+  }
+  .zip-chip .chip-count { color: var(--text-secondary); margin-left: 3px; }
+
+  /* Quantity stepper */
+  .qty-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .qty-row .qty-label { flex: 1; font-size: 15px; font-weight: 600; }
+  .qty-row .qty-fee { font-size: 13.5px; color: var(--text-secondary); min-width: 62px; text-align: right; }
+  .stepper { display: flex; align-items: center; gap: 6px; }
+  .stepper button {
+    width: 40px; height: 40px; font-size: 20px; font-weight: 700;
+    background: var(--page-plane); border: 1px solid var(--border); color: var(--text-primary);
+  }
+  .stepper input {
+    width: 52px; text-align: center; padding: 8px 4px; min-height: 40px; font-size: 16px;
+  }
+
+  .subtotal-line {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 15px; font-weight: 600; padding-top: 10px; border-top: 1px solid var(--gridline); margin-top: 4px;
+  }
+
+  /* Sticky footer for check-in tab */
+  .sticky-footer {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: var(--surface-1); border-top: 1px solid var(--border);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    max-width: 640px; margin: 0 auto;
+  }
+  .sticky-footer .subtotal { text-align: center; font-size: 14.5px; color: var(--text-secondary); margin-bottom: 8px; }
+  .edit-banner {
+    background: var(--page-plane); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; font-size: 13.5px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;
+  }
+
+  /* Toast */
+  .toast {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: var(--good); color: #fff; font-size: 14.5px; font-weight: 600;
+    padding: 10px 18px; border-radius: 20px; opacity: 0; pointer-events: none;
+    transition: opacity 0.2s ease; z-index: 20;
+  }
+  .toast.show { opacity: 1; }
+
+  /* Totals lists */
+  .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--gridline); font-size: 14.5px; }
+  .stat-row:last-child { border-bottom: none; }
+  .breakdown-row { margin-bottom: 10px; }
+  .breakdown-row .top-line { display: flex; justify-content: space-between; font-size: 14.5px; margin-bottom: 4px; }
+  .breakdown-row .bar-track { height: 6px; background: var(--gridline); border-radius: 4px; overflow: hidden; }
+  .breakdown-row .bar-fill { height: 100%; background: var(--series-1); border-radius: 4px; }
+
+  .grand-total { font-size: 17px; font-weight: 700; padding-top: 10px; border-top: 1px solid var(--gridline); margin-top: 4px; display: flex; justify-content: space-between; }
+
+  /* Recent entries */
+  .entry-item { border-bottom: 1px solid var(--gridline); padding: 10px 0; }
+  .entry-item:last-child { border-bottom: none; }
+  .entry-top { display: flex; justify-content: space-between; align-items: center; font-size: 14.5px; font-weight: 600; }
+  .entry-detail { font-size: 13px; color: var(--text-secondary); margin-top: 3px; }
+  .entry-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+  .reset-panel { margin-top: 8px; padding: 12px; border: 1px solid var(--critical); border-radius: 9px; background: var(--page-plane); }
+  .reset-panel p { font-size: 13.5px; color: var(--text-secondary); margin: 0 0 10px; }
+  .reset-panel input { margin-bottom: 10px; }
+  .reset-actions { display: flex; gap: 8px; }
+
+  /* Manage materials */
+  .material-manage-row { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--gridline); flex-wrap: wrap; }
+  .material-manage-row:last-child { border-bottom: none; }
+  .material-manage-row input[type="text"] { flex: 1; min-width: 110px; }
+  .material-manage-row .price-input { display: flex; align-items: center; gap: 4px; width: 96px; }
+  .material-manage-row .price-input span { color: var(--text-secondary); font-size: 14px; }
+  .material-manage-row .price-input input { width: 100%; min-height: 44px; padding: 8px; }
+  .material-manage-row .active-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+  .material-manage-row .active-toggle input { width: 18px; height: 18px; }
+  .add-material-form { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--gridline); }
+</style>
+</head>
+<body>
+<div class="viz-root">
+  <div class="toast" id="toast"></div>
+
+  <div class="wrap">
+
+    <!-- Event setup screen -->
+    <div id="setup-screen" class="card hidden">
+      <h1 id="setup-title">Start New Event</h1>
+      <p class="muted" style="margin-bottom:16px;">Enter the event details before check-in begins.</p>
+      <div class="field">
+        <label for="setup-date">Event Date</label>
+        <input type="date" id="setup-date">
+      </div>
+      <div class="field">
+        <label for="setup-city">City / Location</label>
+        <input type="text" id="setup-city" placeholder="e.g. Riverside, OR">
+      </div>
+      <div class="field">
+        <label for="setup-partner">Partner Organization (optional)</label>
+        <input type="text" id="setup-partner" placeholder="e.g. Local Recycling Co-op">
+      </div>
+      <button class="btn-primary" id="setup-save-btn" onclick="saveSetup()">Start Event</button>
+      <div style="text-align:center; margin-top:10px;">
+        <button class="btn-link hidden" id="setup-cancel-btn" onclick="cancelEditSetup()">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Main app -->
+    <div id="app-screen" class="hidden">
+      <div class="card event-header">
+        <div>
+          <h1 id="header-city">—</h1>
+          <p class="muted" id="header-date-partner">—</p>
+        </div>
+        <button class="btn-icon-sm" onclick="openEditSetup()">Edit</button>
+      </div>
+      <div class="card" style="padding-top:12px;padding-bottom:12px;">
+        <span class="lbl">Vehicles checked in</span>
+        <div class="vehicle-count-badge" id="vehicle-count-badge">0</div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab-btn active" id="tab-btn-checkin" onclick="switchTab('checkin')">Check-In</button>
+        <button class="tab-btn" id="tab-btn-totals" onclick="switchTab('totals')">Totals &amp; Backup</button>
+      </div>
+
+      <!-- Check-in tab -->
+      <div id="tab-checkin">
+        <div class="edit-banner hidden" id="edit-banner">
+          <span>Editing a previous vehicle entry</span>
+          <button class="btn-link" onclick="cancelEditEntry()">Cancel</button>
+        </div>
+
+        <div class="card">
+          <div class="field">
+            <label for="input-zip">ZIP Code <span class="required-mark">*</span></label>
+            <input type="text" id="input-zip" inputmode="numeric" placeholder="e.g. 97201" autofocus onkeydown="if(event.key==='Enter'){document.getElementById('input-referral').focus();}">
+            <div class="zip-suggestions" id="zip-suggestions"></div>
+          </div>
+          <div class="field" style="margin-bottom:0;">
+            <label for="input-referral">How did you hear about this event? <span class="required-mark">*</span></label>
+            <select id="input-referral" onchange="onReferralChange()"></select>
+          </div>
+          <div class="field hidden" id="other-program-field" style="margin-top:12px; margin-bottom:0;">
+            <label for="input-other-program">Which URA program?</label>
+            <input type="text" id="input-other-program" placeholder="Program name">
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Donations / Material Fees</h2>
+          <div id="material-rows"></div>
+          <div class="field" style="margin-bottom:0;">
+            <label for="input-general-donation">General URA Donation ($)</label>
+            <input type="number" id="input-general-donation" min="0" step="0.01" inputmode="decimal" placeholder="0.00" onfocus="this.select()" oninput="updateSubtotal()">
+          </div>
+          <div class="subtotal-line">
+            <span>This vehicle</span>
+            <span id="vehicle-subtotal">$0.00</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Totals tab -->
+      <div id="tab-totals" class="hidden">
+        <div class="card">
+          <h2>ZIP Codes</h2>
+          <div id="zip-breakdown"><p class="muted">No entries yet.</p></div>
+        </div>
+        <div class="card">
+          <h2>How Attendees Heard About the Event</h2>
+          <div id="referral-breakdown"><p class="muted">No entries yet.</p></div>
+        </div>
+        <div class="card">
+          <h2>Donations Received</h2>
+          <div id="donation-breakdown"></div>
+        </div>
+        <div class="card">
+          <h2>Recent Vehicles</h2>
+          <div id="recent-entries"><p class="muted">No entries yet.</p></div>
+        </div>
+        <div class="card">
+          <h2>Manage Fees/Materials</h2>
+          <div id="materials-manage-list"></div>
+          <div class="add-material-form">
+            <div class="field" style="margin-bottom:8px;">
+              <label for="new-material-name">New material name</label>
+              <input type="text" id="new-material-name" placeholder="e.g. Refrigerator">
+            </div>
+            <div class="field" style="margin-bottom:8px;">
+              <label for="new-material-price">Price per item ($)</label>
+              <input type="number" id="new-material-price" min="0" step="0.01" placeholder="0.00">
+            </div>
+            <button class="btn-secondary" style="width:100%;" onclick="addMaterialType()">Add Material</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Manage Referral Sources</h2>
+          <div id="referral-manage-list"></div>
+          <div class="add-material-form">
+            <div class="field" style="margin-bottom:8px;">
+              <label for="new-referral-name">New referral/marketing source</label>
+              <input type="text" id="new-referral-name" placeholder="e.g. Community Radio Ad">
+            </div>
+            <button class="btn-secondary" style="width:100%;" onclick="addReferralSource()">Add Source</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Backup</h2>
+          <button class="btn-secondary" style="width:100%; margin-bottom:12px;" onclick="exportCSV()">Export CSV</button>
+          <button class="btn-danger" id="reset-open-btn" onclick="openResetPanel()">Reset Event (Testing Only)</button>
+          <div class="reset-panel hidden" id="reset-panel">
+            <p>This permanently deletes all vehicle entries and event setup on this device. Your fee/material and referral source lists are kept. This cannot be undone. Type RESET below to confirm.</p>
+            <input type="text" id="reset-confirm-input" placeholder="Type RESET" oninput="onResetInputChange()">
+            <div class="reset-actions">
+              <button class="btn-danger" id="reset-confirm-btn" disabled onclick="doResetEvent()">Permanently Reset Event</button>
+              <button class="btn-secondary" onclick="closeResetPanel()">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sticky action bar (check-in tab only) -->
+      <div class="sticky-footer" id="sticky-footer">
+        <div class="subtotal">This vehicle: <strong id="sticky-subtotal">$0.00</strong></div>
+        <button class="btn-primary" id="count-btn" onclick="countVehicle()">Count Vehicle</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const STORAGE_KEY = 'charmCheckinData';
+
+  // Starting fee-based materials — teams can add/edit/deactivate more from "Manage Fees/Materials".
+  const DEFAULT_MATERIAL_TYPES = [
+    { id: 'tire', label: 'Tire', price: 8, active: true },
+    { id: 'mattress', label: 'Mattress', price: 20, active: true },
+    { id: 'crt', label: 'CRT', price: 15, active: true },
+  ];
+
+  // Starting referral/marketing sources — teams can add/edit/deactivate more from "Manage Referral Sources".
+  // promptsForDetail marks the one option that reveals the "which program" follow-up field.
+  const DEFAULT_REFERRAL_SOURCES = [
+    { id: 'city-social-media', label: 'City/Community – Social Media', active: true },
+    { id: 'city-email', label: 'City/Community – Email', active: true },
+    { id: 'city-physical-location', label: 'City/Community – Physical Location', active: true },
+    { id: 'city-newsletter', label: 'City/Community – Newsletter/Journal', active: true },
+    { id: 'city-website', label: 'City/Community – Website', active: true },
+    { id: 'friend-family', label: 'Friend/Family', active: true },
+    { id: 'road-signage', label: 'Road Signage', active: true },
+    { id: 'search-engine', label: 'Search (Google, etc.)', active: true },
+    { id: 'ura-email-newsletter', label: 'URA – Email/Newsletter', active: true },
+    { id: 'ura-eventbrite', label: 'URA – Eventbrite', active: true },
+    { id: 'ura-other-program', label: 'URA – Other Program', active: true, promptsForDetail: true },
+    { id: 'ura-social-media', label: 'URA – Social Media', active: true },
+    { id: 'ura-website', label: 'URA – Website', active: true },
+    { id: 'instagram-better-utah', label: 'Instagram – Better Utah', active: true },
+    { id: 'instagram-recycle-with-robi', label: 'Instagram – Recycle with Robi', active: true },
+    { id: 'other-dont-know', label: "Other / Don't know", active: true },
+  ];
+
+  let appState = { eventInfo: null, entries: [], materialTypes: [], referralSources: [] };
+  let editingEntryId = null;
+  let isEditingSetupOnly = false;
+  let lastCountAt = 0;
+
+  function loadState() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) { return null; }
+  }
+  function saveState() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+  }
+
+  function fmtUsd(n) { return '$' + Number(n || 0).toFixed(2); }
+  function fmtUsdWhole(n) { return '$' + Math.round(Number(n || 0)).toString(); }
+  function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function getActiveMaterials() { return appState.materialTypes.filter(m => m.active); }
+  function getActiveReferralSources() { return appState.referralSources.filter(s => s.active); }
+  function getReferralSourceLabel(id) {
+    const s = appState.referralSources.find(x => x.id === id);
+    return s ? s.label : '(Unknown source)';
+  }
+  function highlightError(id) {
+    const el = document.getElementById(id);
+    el.style.outline = '2px solid var(--critical)';
+    el.focus();
+    setTimeout(() => { el.style.outline = ''; }, 1200);
+  }
+  function formatEventDateLong(dateStr) {
+    if (!dateStr) return '';
+    // Parse as local date (not UTC) so the displayed date matches what was picked.
+    const [y, m, d] = dateStr.split('-').map(Number);
+    if (!y || !m || !d) return dateStr;
+    const dt = new Date(y, m - 1, d);
+    return dt.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  /* ---------- Init & migration ---------- */
+
+  function migrateState() {
+    if (!appState.materialTypes || !appState.materialTypes.length) {
+      appState.materialTypes = DEFAULT_MATERIAL_TYPES.map(m => ({ ...m }));
+    }
+    if (!appState.referralSources || !appState.referralSources.length) {
+      appState.referralSources = DEFAULT_REFERRAL_SOURCES.map(s => ({ ...s }));
+    }
+    // Backfill any older entries that stored raw referral text instead of a source id,
+    // so nothing gets lost if the data format changes again in the future.
+    appState.entries.forEach(e => {
+      if (!e.referralSourceId && e.referralSource) {
+        let match = appState.referralSources.find(s => s.label.trim().toLowerCase() === String(e.referralSource).trim().toLowerCase());
+        if (!match) {
+          match = { id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()), label: e.referralSource, active: true };
+          appState.referralSources.push(match);
+        }
+        e.referralSourceId = match.id;
+      }
+    });
+  }
+
+  function init() {
+    const saved = loadState();
+    if (saved) appState = saved;
+    migrateState();
+    saveState();
+
+    populateReferralOptions();
+    populateMaterialRows();
+    renderMaterialsManageList();
+    renderReferralManageList();
+
+    if (appState.eventInfo) showAppScreen();
+    else showSetupScreen(false);
+  }
+
+  function populateReferralOptions(forceIncludeId) {
+    const sel = document.getElementById('input-referral');
+    const active = getActiveReferralSources();
+    let extra = '';
+    if (forceIncludeId && !active.find(s => s.id === forceIncludeId)) {
+      const inactiveSource = appState.referralSources.find(s => s.id === forceIncludeId);
+      if (inactiveSource) extra = `<option value="${inactiveSource.id}">${escapeHtml(inactiveSource.label)} (inactive)</option>`;
+    }
+    sel.innerHTML = '<option value="">— Select —</option>' +
+      active.map(s => `<option value="${s.id}">${escapeHtml(s.label)}</option>`).join('') + extra;
+  }
+
+  function populateMaterialRows() {
+    const container = document.getElementById('material-rows');
+    const active = getActiveMaterials();
+    if (!active.length) {
+      container.innerHTML = '<p class="muted">No active fee materials. Add one under Manage Fees/Materials.</p>';
+      return;
+    }
+    container.innerHTML = active.map(m => `
+      <div class="qty-row">
+        <div class="qty-label">${escapeHtml(m.label)} <span class="muted">($${m.price} ea)</span></div>
+        <div class="stepper">
+          <button type="button" onclick="stepQty('${m.id}', -1)">&minus;</button>
+          <input type="number" id="qty-${m.id}" min="0" value="0" inputmode="numeric" onfocus="this.select()" oninput="updateSubtotal()">
+          <button type="button" onclick="stepQty('${m.id}', 1)">+</button>
+        </div>
+        <div class="qty-fee" id="fee-${m.id}">$0.00</div>
+      </div>
+    `).join('');
+  }
+
+  /* ---------- Setup screen ---------- */
+
+  function showSetupScreen(editOnly) {
+    isEditingSetupOnly = editOnly;
+    document.getElementById('app-screen').classList.add('hidden');
+    document.getElementById('setup-screen').classList.remove('hidden');
+    document.getElementById('setup-title').textContent = editOnly ? 'Edit Event Info' : 'Start New Event';
+    document.getElementById('setup-save-btn').textContent = editOnly ? 'Save Changes' : 'Start Event';
+    document.getElementById('setup-cancel-btn').classList.toggle('hidden', !editOnly);
+
+    if (editOnly && appState.eventInfo) {
+      document.getElementById('setup-date').value = appState.eventInfo.date || '';
+      document.getElementById('setup-city').value = appState.eventInfo.city || '';
+      document.getElementById('setup-partner').value = appState.eventInfo.partnerOrg || '';
+    } else {
+      document.getElementById('setup-date').value = new Date().toISOString().slice(0, 10);
+      document.getElementById('setup-city').value = '';
+      document.getElementById('setup-partner').value = '';
+    }
+  }
+
+  function openEditSetup() { showSetupScreen(true); }
+  function cancelEditSetup() { showAppScreen(); }
+
+  function saveSetup() {
+    const date = document.getElementById('setup-date').value;
+    const city = document.getElementById('setup-city').value.trim();
+    const partnerOrg = document.getElementById('setup-partner').value.trim();
+    if (!city) { alert('Please enter a city or location.'); return; }
+
+    if (isEditingSetupOnly) {
+      appState.eventInfo = { date, city, partnerOrg };
+    } else {
+      // Fee/material and referral-source lists are kept across new events; only event info and entries reset.
+      appState = { eventInfo: { date, city, partnerOrg }, entries: [], materialTypes: appState.materialTypes, referralSources: appState.referralSources };
+    }
+    saveState();
+    showAppScreen();
+  }
+
+  function showAppScreen() {
+    document.getElementById('setup-screen').classList.add('hidden');
+    document.getElementById('app-screen').classList.remove('hidden');
+    const info = appState.eventInfo || {};
+    document.getElementById('header-city').textContent = info.city || '—';
+    const dp = [info.date, info.partnerOrg].filter(Boolean).join(' · ');
+    document.getElementById('header-date-partner').textContent = dp || '—';
+    switchTab('checkin');
+    refreshVehicleCount();
+    renderZipSuggestions();
+    renderTotals();
+  }
+
+  /* ---------- Tabs ---------- */
+
+  function switchTab(tab) {
+    const isCheckin = tab === 'checkin';
+    document.getElementById('tab-checkin').classList.toggle('hidden', !isCheckin);
+    document.getElementById('tab-totals').classList.toggle('hidden', isCheckin);
+    document.getElementById('tab-btn-checkin').classList.toggle('active', isCheckin);
+    document.getElementById('tab-btn-totals').classList.toggle('active', !isCheckin);
+    document.getElementById('sticky-footer').classList.toggle('hidden', !isCheckin);
+    if (!isCheckin) { renderTotals(); renderMaterialsManageList(); renderReferralManageList(); }
+  }
+
+  /* ---------- ZIP suggestions ---------- */
+
+  function renderZipSuggestions() {
+    const container = document.getElementById('zip-suggestions');
+    const counts = {};
+    appState.entries.forEach(e => { if (e.zip) counts[e.zip] = (counts[e.zip] || 0) + 1; });
+    const list = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    if (!list.length) { container.innerHTML = ''; return; }
+    container.innerHTML = list.map(([zip, count]) =>
+      `<button type="button" class="zip-chip" onclick="selectZipSuggestion('${escapeHtml(zip)}')">${escapeHtml(zip)} <span class="chip-count">(${count})</span></button>`
+    ).join('');
+  }
+
+  function selectZipSuggestion(zip) {
+    document.getElementById('input-zip').value = zip;
+    document.getElementById('input-referral').focus();
+  }
+
+  /* ---------- Check-in form ---------- */
+
+  function onReferralChange() {
+    const id = document.getElementById('input-referral').value;
+    const source = appState.referralSources.find(s => s.id === id);
+    document.getElementById('other-program-field').classList.toggle('hidden', !(source && source.promptsForDetail));
+  }
+
+  function stepQty(id, delta) {
+    const input = document.getElementById('qty-' + id);
+    const next = Math.max(0, (parseInt(input.value, 10) || 0) + delta);
+    input.value = next;
+    updateSubtotal();
+  }
+
+  function updateSubtotal() {
+    let total = 0;
+    getActiveMaterials().forEach(m => {
+      const el = document.getElementById('qty-' + m.id);
+      if (!el) return;
+      const qty = Math.max(0, parseInt(el.value, 10) || 0);
+      const fee = qty * m.price;
+      const feeEl = document.getElementById('fee-' + m.id);
+      if (feeEl) feeEl.textContent = fmtUsd(fee);
+      total += fee;
+    });
+    const general = Math.max(0, parseFloat(document.getElementById('input-general-donation').value) || 0);
+    total += general;
+    document.getElementById('vehicle-subtotal').textContent = fmtUsd(total);
+    document.getElementById('sticky-subtotal').textContent = fmtUsd(total);
+    return total;
+  }
+
+  function resetCheckinForm() {
+    document.getElementById('input-zip').value = '';
+    populateReferralOptions();
+    document.getElementById('input-referral').value = '';
+    document.getElementById('input-other-program').value = '';
+    document.getElementById('other-program-field').classList.add('hidden');
+    getActiveMaterials().forEach(m => {
+      const el = document.getElementById('qty-' + m.id);
+      if (el) el.value = 0;
+    });
+    document.getElementById('input-general-donation').value = '';
+    updateSubtotal();
+    document.getElementById('input-zip').focus();
+  }
+
+  function cancelEditEntry() {
+    editingEntryId = null;
+    document.getElementById('edit-banner').classList.add('hidden');
+    document.getElementById('count-btn').textContent = 'Count Vehicle';
+    resetCheckinForm();
+  }
+
+  function countVehicle() {
+    const now = Date.now();
+    if (now - lastCountAt < 400) return; // guard against accidental double-tap
+    lastCountAt = now;
+
+    const zip = document.getElementById('input-zip').value.trim();
+    if (!zip) { highlightError('input-zip'); return; }
+
+    const referralSourceId = document.getElementById('input-referral').value;
+    if (!referralSourceId) { highlightError('input-referral'); return; }
+
+    const referralSourceObj = appState.referralSources.find(s => s.id === referralSourceId);
+    const referralOther = (referralSourceObj && referralSourceObj.promptsForDetail)
+      ? document.getElementById('input-other-program').value.trim()
+      : '';
+
+    const existingEntry = editingEntryId ? appState.entries.find(e => e.id === editingEntryId) : null;
+    // Start from the existing entry's materials (if editing) so fee history for any
+    // since-deactivated material isn't lost — then overwrite with the active fields on screen.
+    const materials = existingEntry ? { ...existingEntry.materials } : {};
+    getActiveMaterials().forEach(m => {
+      const el = document.getElementById('qty-' + m.id);
+      const qty = Math.max(0, parseInt(el.value, 10) || 0);
+      materials[m.id] = { label: m.label, qty, fee: qty * m.price };
+    });
+
+    const generalDonation = Math.max(0, parseFloat(document.getElementById('input-general-donation').value) || 0);
+    const totalMoney = Object.values(materials).reduce((sum, m) => sum + m.fee, 0) + generalDonation;
+
+    if (existingEntry) {
+      Object.assign(existingEntry, { zip, referralSourceId, referralOther, materials, generalDonation, totalMoney });
+      editingEntryId = null;
+      document.getElementById('edit-banner').classList.add('hidden');
+      document.getElementById('count-btn').textContent = 'Count Vehicle';
+      showToast('Vehicle updated');
+    } else {
+      appState.entries.push({
+        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+        timestamp: new Date().toISOString(),
+        zip, referralSourceId, referralOther, materials, generalDonation, totalMoney,
+      });
+      showToast('Vehicle #' + appState.entries.length + ' counted');
+    }
+
+    saveState();
+    resetCheckinForm();
+    refreshVehicleCount();
+    renderZipSuggestions();
+  }
+
+  function refreshVehicleCount() {
+    document.getElementById('vehicle-count-badge').textContent = appState.entries.length;
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(showToast._timer);
+    showToast._timer = setTimeout(() => t.classList.remove('show'), 1200);
+  }
+
+  /* ---------- Totals ---------- */
+
+  function computeTotals() {
+    const entries = appState.entries;
+    const zipCounts = {};
+    entries.forEach(e => { if (e.zip) zipCounts[e.zip] = (zipCounts[e.zip] || 0) + 1; });
+    const zipList = Object.entries(zipCounts).sort((a, b) => b[1] - a[1]);
+
+    // Loop over ALL referral sources (active + inactive) so deactivated ones keep their history.
+    const referralCounts = {};
+    entries.forEach(e => { if (e.referralSourceId) referralCounts[e.referralSourceId] = (referralCounts[e.referralSourceId] || 0) + 1; });
+    const referralTotals = appState.referralSources
+      .map(s => ({ id: s.id, label: s.label, active: s.active, count: referralCounts[s.id] || 0 }))
+      .sort((a, b) => b.count - a.count);
+
+    // Loop over ALL materials (active + inactive) so deactivated fee types keep their history.
+    const materialTotals = {};
+    appState.materialTypes.forEach(m => { materialTotals[m.id] = { label: m.label, qty: 0, fee: 0, active: m.active }; });
+    let generalTotal = 0, grandTotal = 0;
+    entries.forEach(e => {
+      appState.materialTypes.forEach(m => {
+        const md = e.materials && e.materials[m.id];
+        if (md) { materialTotals[m.id].qty += md.qty; materialTotals[m.id].fee += md.fee; }
+      });
+      generalTotal += e.generalDonation || 0;
+      grandTotal += e.totalMoney || 0;
+    });
+
+    return { zipList, referralTotals, materialTotals, generalTotal, grandTotal };
+  }
+
+  function renderBars(container, list) {
+    const max = list.length ? list[0][1] : 0;
+    container.innerHTML = list.map(([label, count]) => `
+      <div class="breakdown-row">
+        <div class="top-line"><span>${escapeHtml(label)}</span><span>${count}</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:${max ? (count / max * 100) : 0}%"></div></div>
+      </div>
+    `).join('');
+  }
+
+  function renderTotals() {
+    const t = computeTotals();
+
+    const zipEl = document.getElementById('zip-breakdown');
+    if (t.zipList.length) renderBars(zipEl, t.zipList); else zipEl.innerHTML = '<p class="muted">No entries yet.</p>';
+
+    const refEl = document.getElementById('referral-breakdown');
+    const usedReferrals = t.referralTotals.filter(r => r.count > 0);
+    if (usedReferrals.length) {
+      renderBars(refEl, usedReferrals.map(r => [r.label + (r.active ? '' : ' (inactive)'), r.count]));
+    } else {
+      refEl.innerHTML = '<p class="muted">No entries yet.</p>';
+    }
+
+    const donEl = document.getElementById('donation-breakdown');
+    let donHtml = appState.materialTypes.map(m => {
+      const d = t.materialTotals[m.id];
+      const tag = m.active ? '' : ' <span class="muted">(inactive)</span>';
+      return `<div class="stat-row"><span>${escapeHtml(d.label)}s: ${d.qty} collected${tag}</span><span>${fmtUsd(d.fee)}</span></div>`;
+    }).join('');
+    donHtml += `<div class="stat-row"><span>General URA Donations</span><span>${fmtUsd(t.generalTotal)}</span></div>`;
+    donHtml += `<div class="grand-total"><span>Total Donations/Fees Received</span><span>${fmtUsd(t.grandTotal)}</span></div>`;
+    donEl.innerHTML = donHtml;
+
+    renderRecentEntries();
+  }
+
+  function renderRecentEntries() {
+    const container = document.getElementById('recent-entries');
+    const recent = [...appState.entries].reverse().slice(0, 8);
+    if (!recent.length) { container.innerHTML = '<p class="muted">No entries yet.</p>'; return; }
+
+    container.innerHTML = recent.map(e => {
+      const materialsSummary = appState.materialTypes
+        .map(m => ({ m, md: e.materials[m.id] }))
+        .filter(x => x.md && x.md.qty > 0)
+        .map(x => `${x.md.qty} ${x.m.label}${x.md.qty > 1 ? 's' : ''}`)
+        .join(', ');
+      const time = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const referral = getReferralSourceLabel(e.referralSourceId);
+      const referralDetail = e.referralOther ? ` — ${escapeHtml(e.referralOther)}` : '';
+      return `
+        <div class="entry-item">
+          <div class="entry-top"><span>ZIP ${escapeHtml(e.zip)} · ${time}</span><span>${fmtUsd(e.totalMoney)}</span></div>
+          <div class="entry-detail">${escapeHtml(referral)}${referralDetail}${materialsSummary ? ' · ' + escapeHtml(materialsSummary) : ''}</div>
+          <div class="entry-actions">
+            <button class="btn-icon-sm" onclick="editEntry('${e.id}')">Edit</button>
+            <button class="btn-icon-sm" onclick="deleteEntry('${e.id}')">Delete</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function editEntry(id) {
+    const entry = appState.entries.find(e => e.id === id);
+    if (!entry) return;
+    editingEntryId = id;
+
+    document.getElementById('input-zip').value = entry.zip;
+    populateReferralOptions(entry.referralSourceId);
+    document.getElementById('input-referral').value = entry.referralSourceId || '';
+    onReferralChange();
+    document.getElementById('input-other-program').value = entry.referralOther || '';
+    getActiveMaterials().forEach(m => {
+      const el = document.getElementById('qty-' + m.id);
+      if (el) el.value = (entry.materials[m.id] && entry.materials[m.id].qty) || 0;
+    });
+    document.getElementById('input-general-donation').value = entry.generalDonation || '';
+    updateSubtotal();
+
+    document.getElementById('edit-banner').classList.remove('hidden');
+    document.getElementById('count-btn').textContent = 'Update Vehicle';
+    switchTab('checkin');
+    window.scrollTo(0, 0);
+  }
+
+  function deleteEntry(id) {
+    if (!confirm('Delete this vehicle entry? This cannot be undone.')) return;
+    appState.entries = appState.entries.filter(e => e.id !== id);
+    if (editingEntryId === id) cancelEditEntry();
+    saveState();
+    refreshVehicleCount();
+    renderZipSuggestions();
+    renderTotals();
+  }
+
+  /* ---------- Manage Fees/Materials ---------- */
+
+  function renderMaterialsManageList() {
+    const container = document.getElementById('materials-manage-list');
+    if (!appState.materialTypes.length) { container.innerHTML = '<p class="muted">No materials yet.</p>'; return; }
+    container.innerHTML = appState.materialTypes.map(m => `
+      <div class="material-manage-row">
+        <input type="text" value="${escapeHtml(m.label)}" onchange="updateMaterialField('${m.id}','label', this.value)">
+        <div class="price-input">
+          <span>$</span>
+          <input type="number" min="0" step="0.01" value="${m.price}" onchange="updateMaterialField('${m.id}','price', this.value)">
+        </div>
+        <label class="active-toggle">
+          <input type="checkbox" ${m.active ? 'checked' : ''} onchange="updateMaterialField('${m.id}','active', this.checked)">
+          Active
+        </label>
+      </div>
+    `).join('');
+  }
+
+  function updateMaterialField(id, field, value) {
+    const m = appState.materialTypes.find(mt => mt.id === id);
+    if (!m) return;
+
+    if (field === 'label') {
+      const trimmed = String(value).trim();
+      if (!trimmed) { renderMaterialsManageList(); return; }
+      m.label = trimmed;
+    } else if (field === 'price') {
+      const p = parseFloat(value);
+      if (!isNaN(p) && p >= 0) m.price = p;
+    } else if (field === 'active') {
+      m.active = !!value;
+    }
+
+    saveState();
+    populateMaterialRows();
+    updateSubtotal();
+    renderMaterialsManageList();
+    renderTotals();
+  }
+
+  function addMaterialType() {
+    const nameInput = document.getElementById('new-material-name');
+    const priceInput = document.getElementById('new-material-price');
+    const label = nameInput.value.trim();
+    const price = parseFloat(priceInput.value);
+    if (!label) { alert('Enter a name for the material.'); return; }
+    if (isNaN(price) || price < 0) { alert('Enter a valid price (0 or more).'); return; }
+
+    appState.materialTypes.push({
+      id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+      label, price, active: true,
+    });
+    saveState();
+    nameInput.value = '';
+    priceInput.value = '';
+    populateMaterialRows();
+    updateSubtotal();
+    renderMaterialsManageList();
+    renderTotals();
+  }
+
+  /* ---------- Manage Referral Sources ---------- */
+
+  function renderReferralManageList() {
+    const container = document.getElementById('referral-manage-list');
+    if (!appState.referralSources.length) { container.innerHTML = '<p class="muted">No referral sources yet.</p>'; return; }
+    container.innerHTML = appState.referralSources.map(s => `
+      <div class="material-manage-row">
+        <input type="text" value="${escapeHtml(s.label)}" onchange="updateReferralField('${s.id}','label', this.value)">
+        <label class="active-toggle">
+          <input type="checkbox" ${s.active ? 'checked' : ''} onchange="updateReferralField('${s.id}','active', this.checked)">
+          Active
+        </label>
+      </div>
+    `).join('');
+  }
+
+  function updateReferralField(id, field, value) {
+    const s = appState.referralSources.find(rs => rs.id === id);
+    if (!s) return;
+
+    if (field === 'label') {
+      const trimmed = String(value).trim();
+      if (!trimmed) { renderReferralManageList(); return; }
+      s.label = trimmed;
+    } else if (field === 'active') {
+      s.active = !!value;
+    }
+
+    saveState();
+    populateReferralOptions();
+    renderReferralManageList();
+    renderTotals();
+  }
+
+  function addReferralSource() {
+    const nameInput = document.getElementById('new-referral-name');
+    const label = nameInput.value.trim();
+    if (!label) { alert('Enter a name for the referral source.'); return; }
+
+    appState.referralSources.push({
+      id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+      label, active: true,
+    });
+    saveState();
+    nameInput.value = '';
+    populateReferralOptions();
+    renderReferralManageList();
+    renderTotals();
+  }
+
+  /* ---------- CSV export ---------- */
+
+  function csvEscape(value) {
+    const str = String(value === undefined || value === null ? '' : value);
+    return /[",\n]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+  }
+
+  // Wraps a numeric ZIP as an Excel/Sheets "text formula" (="02134") so leading zeros survive
+  // being opened in a spreadsheet. Non-numeric input is left as plain text (already safe as-is).
+  function csvZipCell(zip) {
+    const str = String(zip || '');
+    return /^\d+$/.test(str) ? '="' + str + '"' : str;
+  }
+
+  function exportCSV() {
+    if (!appState.entries.length) { alert('No vehicle entries yet — nothing to export.'); return; }
+
+    const info = appState.eventInfo || {};
+    const t = computeTotals();
+    const rows = [];
+
+    // --- 1. Event Summary ---
+    rows.push(['Event Summary']);
+    rows.push(['Event Date', formatEventDateLong(info.date)]);
+    rows.push(['City / Location', info.city || '']);
+    rows.push(['Partner Organization', info.partnerOrg || '']);
+    rows.push(['Total Vehicles', appState.entries.length]);
+    rows.push(['Total Donations/Fees Received', fmtUsdWhole(t.grandTotal)]);
+    rows.push([]);
+
+    // --- 2. ZIP Code Summary ---
+    rows.push(['ZIP Code Summary']);
+    rows.push(['ZIP Code', 'Vehicle Count']);
+    t.zipList.forEach(([zip, count]) => rows.push([csvZipCell(zip), count]));
+    rows.push(['Total Vehicles', appState.entries.length]);
+    rows.push([]);
+
+    // --- 3. How Attendees Heard About the Event ---
+    rows.push(['How Attendees Heard About the Event']);
+    rows.push(['Referral / Marketing Source', 'Response Count']);
+    const usedReferrals = t.referralTotals.filter(r => r.count > 0);
+    let totalResponses = 0;
+    usedReferrals.forEach(r => {
+      totalResponses += r.count;
+      rows.push([r.label + (r.active ? '' : ' (inactive)'), r.count]);
+    });
+    rows.push(['Total Responses', totalResponses]);
+    rows.push([]);
+
+    // --- 4. Donations and Material Fees ---
+    rows.push(['Donations and Material Fees']);
+    rows.push(['Material', 'Quantity', 'Fee per Item', 'Total Amount']);
+    appState.materialTypes.forEach(m => {
+      const d = t.materialTotals[m.id];
+      if (!d.qty) return; // only materials actually used during the event
+      const label = d.label + (d.active ? '' : ' (inactive)');
+      rows.push([label, d.qty, fmtUsdWhole(m.price), fmtUsdWhole(d.fee)]);
+    });
+    rows.push(['General URA Donations', '', '', fmtUsdWhole(t.generalTotal)]);
+    rows.push(['Total Donations/Fees Received', '', '', fmtUsdWhole(t.grandTotal)]);
+    rows.push([]);
+
+    // --- 5. Detailed Vehicle Records ---
+    rows.push(['Detailed Vehicle Records']);
+    const header = ['Timestamp', 'ZIP Code', 'How They Heard About the Event', 'Referral Detail'];
+    appState.materialTypes.forEach(m => { header.push(m.label + ' Qty', m.label + ' Fee'); });
+    header.push('General Donation', 'Total Money Received');
+    rows.push(header);
+
+    appState.entries.forEach(e => {
+      const row = [
+        new Date(e.timestamp).toLocaleString(),
+        csvZipCell(e.zip),
+        getReferralSourceLabel(e.referralSourceId),
+        e.referralOther || '',
+      ];
+      appState.materialTypes.forEach(m => {
+        const md = e.materials[m.id] || { qty: 0, fee: 0 };
+        row.push(md.qty, md.fee.toFixed(2));
+      });
+      row.push((e.generalDonation || 0).toFixed(2), (e.totalMoney || 0).toFixed(2));
+      rows.push(row);
+    });
+
+    const csvContent = rows.map(r => r.map(csvEscape).join(',')).join('\r\n');
+    const citySlug = (info.city || 'event').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const filename = `charm-checkin-${info.date || 'export'}-${citySlug}.csv`;
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  /* ---------- Reset event ---------- */
+
+  function openResetPanel() {
+    document.getElementById('reset-panel').classList.remove('hidden');
+    document.getElementById('reset-confirm-input').value = '';
+    document.getElementById('reset-confirm-btn').disabled = true;
+  }
+  function closeResetPanel() {
+    document.getElementById('reset-panel').classList.add('hidden');
+  }
+  function onResetInputChange() {
+    const val = document.getElementById('reset-confirm-input').value.trim().toUpperCase();
+    document.getElementById('reset-confirm-btn').disabled = val !== 'RESET';
+  }
+  function doResetEvent() {
+    // Fee/material and referral-source lists are intentionally preserved across a reset — only event info and entries clear.
+    appState = { eventInfo: null, entries: [], materialTypes: appState.materialTypes, referralSources: appState.referralSources };
+    saveState();
+    editingEntryId = null;
+    closeResetPanel();
+    showSetupScreen(false);
+  }
+
+  init();
+</script>
+</body>
+</html>
