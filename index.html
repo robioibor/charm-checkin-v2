@@ -51,6 +51,7 @@
   h2 { font-size: 16px; margin: 0 0 12px; }
   p.muted { color: var(--text-secondary); font-size: 14px; margin: 0; }
   .required-mark { color: var(--critical); }
+  .error { color: var(--critical); font-size: 13.5px; margin: 6px 0 0; }
 
   /* Cards */
   .card {
@@ -359,9 +360,28 @@
         <div class="card">
           <h2>Backup</h2>
           <button class="btn-secondary" style="width:100%; margin-bottom:12px;" onclick="exportCSV()">Export CSV</button>
+          <button class="btn-secondary" style="width:100%; margin-bottom:12px;" onclick="downloadJsonBackup()">Download Full Backup (JSON)</button>
+
+          <div class="field" style="margin-bottom:12px;">
+            <label for="restore-file-input">Restore from Backup (JSON)</label>
+            <input type="file" id="restore-file-input" accept=".json,application/json" onchange="onRestoreFileSelected(event)">
+            <p class="error hidden" id="restore-error"></p>
+          </div>
+
+          <div class="reset-panel hidden" id="restore-panel">
+            <p>Restoring will permanently replace all check-ins, event info, fee materials, and referral sources currently on this device with the contents of this backup file. This cannot be undone. Type RESTORE below to confirm.</p>
+            <input type="text" id="restore-confirm-input" placeholder="Type RESTORE" oninput="onRestoreInputChange()">
+            <div class="reset-actions">
+              <button class="btn-danger" id="restore-confirm-btn" disabled onclick="doRestoreBackup()">Permanently Restore Backup</button>
+              <button class="btn-secondary" onclick="closeRestorePanel()">Cancel</button>
+            </div>
+          </div>
+
           <button class="btn-danger" id="reset-open-btn" onclick="openResetPanel()">Reset Event (Testing Only)</button>
           <div class="reset-panel hidden" id="reset-panel">
             <p>This permanently deletes all vehicle entries and event setup on this device. Your fee/material and referral source lists are kept. This cannot be undone. Type RESET below to confirm.</p>
+            <p class="muted">Tip: download a full backup before resetting -- this cannot be recovered otherwise.</p>
+            <button class="btn-secondary" style="width:100%; margin-bottom:10px;" onclick="downloadJsonBackup()">Download Backup First</button>
             <input type="text" id="reset-confirm-input" placeholder="Type RESET" oninput="onResetInputChange()">
             <div class="reset-actions">
               <button class="btn-danger" id="reset-confirm-btn" disabled onclick="doResetEvent()">Permanently Reset Event</button>
@@ -373,6 +393,7 @@
 
       <!-- Sticky action bar (check-in tab only) -->
       <div class="sticky-footer" id="sticky-footer">
+        <p class="error hidden" id="checkin-error"></p>
         <div class="subtotal">This vehicle: <strong id="sticky-subtotal">$0.00</strong></div>
         <button class="btn-primary" id="count-btn" onclick="countVehicle()">Count Vehicle</button>
       </div>
@@ -660,10 +681,41 @@
     resetCheckinForm();
   }
 
+  function trySaveCheckinEntries(proposedEntries) {
+    let serialized;
+    try {
+      serialized = JSON.stringify({ ...appState, entries: proposedEntries });
+    } catch (e) {
+      showCheckinError('This check-in could not be saved (its data could not be processed). Nothing was recorded, please try again.');
+      return false;
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, serialized);
+    } catch (e) {
+      showCheckinError('Could not save this check-in to this device (storage may be full or unavailable). Nothing was recorded, please try again.');
+      return false;
+    }
+    return true;
+  }
+
+  function showCheckinError(message) {
+    const el = document.getElementById('checkin-error');
+    el.textContent = message;
+    el.classList.remove('hidden');
+  }
+
+  function clearCheckinError() {
+    const el = document.getElementById('checkin-error');
+    el.textContent = '';
+    el.classList.add('hidden');
+  }
+
   function countVehicle() {
     const now = Date.now();
     if (now - lastCountAt < 400) return; // guard against accidental double-tap
     lastCountAt = now;
+
+    clearCheckinError();
 
     const zip = document.getElementById('input-zip').value.trim();
     if (!zip) { highlightError('input-zip'); return; }
@@ -689,22 +741,43 @@
     const generalDonation = Math.max(0, parseFloat(document.getElementById('input-general-donation').value) || 0);
     const totalMoney = Object.values(materials).reduce((sum, m) => sum + m.fee, 0) + generalDonation;
 
+    let proposedEntries;
     if (existingEntry) {
-      Object.assign(existingEntry, { zip, referralSourceId, referralOther, materials, generalDonation, totalMoney });
+      const updatedEntry = { ...existingEntry, zip, referralSourceId, referralOther, materials, generalDonation, totalMoney };
+      proposedEntries = appState.entries.map(e => (e.id === existingEntry.id ? updatedEntry : e));
+    } else {
+      const newEntry = {
+        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+        timestamp: new Date().toISOString(),
+        zip, referralSourceId, referralOther, materials, generalDonation, totalMoney,
+      };
+      proposedEntries = [...appState.entries, newEntry];
+    }
+
+    const countBtn = document.getElementById('count-btn');
+    countBtn.disabled = true;
+    let saved = false;
+    try {
+      saved = trySaveCheckinEntries(proposedEntries);
+    } finally {
+      countBtn.disabled = false;
+    }
+
+    if (!saved) {
+      return;
+    }
+
+    appState.entries = proposedEntries;
+
+    if (existingEntry) {
       editingEntryId = null;
       document.getElementById('edit-banner').classList.add('hidden');
       document.getElementById('count-btn').textContent = 'Count Vehicle';
       showToast('Vehicle updated');
     } else {
-      appState.entries.push({
-        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
-        timestamp: new Date().toISOString(),
-        zip, referralSourceId, referralOther, materials, generalDonation, totalMoney,
-      });
       showToast('Vehicle #' + appState.entries.length + ' counted');
     }
 
-    saveState();
     resetCheckinForm();
     refreshVehicleCount();
     renderZipSuggestions();
@@ -1083,6 +1156,212 @@
     editingEntryId = null;
     closeResetPanel();
     showSetupScreen(false);
+  }
+
+  /* ---------- Full JSON backup & restore ---------- */
+
+  const BACKUP_APP_ID = 'charm-checkin-v2-backup';
+  const BACKUP_VERSION = 1;
+  let pendingRestoreData = null;
+
+  function downloadJsonBackup() {
+    const payload = {
+      app: BACKUP_APP_ID,
+      version: BACKUP_VERSION,
+      exportedAt: new Date().toISOString(),
+      data: appState,
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const info = appState.eventInfo || {};
+    const citySlug = (info.city || 'event').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const datePart = info.date || new Date().toISOString().slice(0, 10);
+    const filename = `charm-checkin-v2-backup-${datePart}-${citySlug}.json`;
+
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Backup downloaded');
+  }
+
+  function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
+  }
+
+  // Checks the backup envelope AND the structure of everything inside
+  // data.entries/materialTypes/referralSources -- not just that those
+  // arrays exist. Returns a specific, actionable error string, or null
+  // if the file is valid. Never mutates appState -- callers only apply
+  // parsed.data after this returns null.
+  function validateBackupPayload(parsed) {
+    if (!isPlainObject(parsed)) return 'This file is not a valid backup (not a JSON object).';
+    if (parsed.app !== BACKUP_APP_ID) return 'This file does not look like a CHaRM Check-In V2 backup.';
+    if (typeof parsed.version !== 'number') return 'This backup file is missing a version number.';
+    if (parsed.version !== BACKUP_VERSION) {
+      return `This backup is version ${parsed.version}, but this app only supports version ${BACKUP_VERSION}.`;
+    }
+    if (!isPlainObject(parsed.data)) return 'This backup file is missing its data.';
+    const data = parsed.data;
+
+    if (data.eventInfo !== null && data.eventInfo !== undefined) {
+      if (!isPlainObject(data.eventInfo)) return 'The event info in this backup is not valid.';
+      if (data.eventInfo.date !== undefined && typeof data.eventInfo.date !== 'string') {
+        return 'The event date in this backup is not valid.';
+      }
+      if (data.eventInfo.city !== undefined && typeof data.eventInfo.city !== 'string') {
+        return 'The event city in this backup is not valid.';
+      }
+      if (data.eventInfo.partnerOrg !== undefined && typeof data.eventInfo.partnerOrg !== 'string') {
+        return 'The event partner organization in this backup is not valid.';
+      }
+    }
+
+    if (!Array.isArray(data.entries)) return 'This backup is missing its list of check-ins.';
+    for (let i = 0; i < data.entries.length; i++) {
+      const e = data.entries[i];
+      if (!isPlainObject(e)) return `Check-in #${i + 1} in this backup is not valid.`;
+      if (typeof e.id !== 'string' || !e.id) return `Check-in #${i + 1} is missing a valid id.`;
+      if (typeof e.timestamp !== 'string' || isNaN(Date.parse(e.timestamp))) {
+        return `Check-in #${i + 1} has an invalid timestamp.`;
+      }
+      if (e.zip !== undefined && typeof e.zip !== 'string') return `Check-in #${i + 1} has an invalid ZIP code.`;
+      if (e.referralSourceId !== undefined && typeof e.referralSourceId !== 'string') {
+        return `Check-in #${i + 1} has an invalid referral source.`;
+      }
+      if (e.materials !== undefined && e.materials !== null) {
+        if (!isPlainObject(e.materials)) return `Check-in #${i + 1} has invalid material data.`;
+        for (const key of Object.keys(e.materials)) {
+          const md = e.materials[key];
+          if (!isPlainObject(md)) return `Check-in #${i + 1} has invalid data for material "${key}".`;
+          if (md.label !== undefined && typeof md.label !== 'string') {
+            return `Check-in #${i + 1} has an invalid label for material "${key}".`;
+          }
+          if (md.qty !== undefined && typeof md.qty !== 'number') {
+            return `Check-in #${i + 1} has an invalid quantity for material "${key}".`;
+          }
+          if (md.fee !== undefined && typeof md.fee !== 'number') {
+            return `Check-in #${i + 1} has an invalid fee for material "${key}".`;
+          }
+        }
+      }
+      if (e.generalDonation !== undefined && e.generalDonation !== null && typeof e.generalDonation !== 'number') {
+        return `Check-in #${i + 1} has an invalid donation amount.`;
+      }
+      if (e.totalMoney !== undefined && e.totalMoney !== null && typeof e.totalMoney !== 'number') {
+        return `Check-in #${i + 1} has an invalid total amount.`;
+      }
+    }
+
+    if (!Array.isArray(data.materialTypes)) return 'This backup is missing its fee materials list.';
+    for (let i = 0; i < data.materialTypes.length; i++) {
+      const m = data.materialTypes[i];
+      if (!isPlainObject(m)) return `Fee material #${i + 1} in this backup is not valid.`;
+      if (typeof m.id !== 'string' || !m.id) return `Fee material #${i + 1} is missing a valid id.`;
+      if (typeof m.label !== 'string' || !m.label) return `Fee material #${i + 1} is missing a label.`;
+      if (typeof m.active !== 'boolean') return `Fee material #${i + 1} is missing a valid active flag.`;
+      if (m.price !== undefined && typeof m.price !== 'number') return `Fee material #${i + 1} has an invalid price.`;
+    }
+
+    if (!Array.isArray(data.referralSources)) return 'This backup is missing its referral sources list.';
+    for (let i = 0; i < data.referralSources.length; i++) {
+      const s = data.referralSources[i];
+      if (!isPlainObject(s)) return `Referral source #${i + 1} in this backup is not valid.`;
+      if (typeof s.id !== 'string' || !s.id) return `Referral source #${i + 1} is missing a valid id.`;
+      if (typeof s.label !== 'string' || !s.label) return `Referral source #${i + 1} is missing a label.`;
+      if (typeof s.active !== 'boolean') return `Referral source #${i + 1} is missing a valid active flag.`;
+    }
+
+    return null;
+  }
+
+  function showRestoreError(message) {
+    // Also closes the confirmation panel (if open) so a failed file
+    // selection or save can never leave an armed "RESTORE" confirm button
+    // sitting on screen pointed at stale or cleared pending data.
+    closeRestorePanel();
+    const el = document.getElementById('restore-error');
+    el.textContent = message;
+    el.classList.remove('hidden');
+  }
+
+  async function onRestoreFileSelected(event) {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = ''; // allow re-selecting the same file again later
+    if (!file) return;
+
+    const errorEl = document.getElementById('restore-error');
+    errorEl.classList.add('hidden');
+    errorEl.textContent = '';
+
+    let parsed;
+    try {
+      const text = await file.text();
+      parsed = JSON.parse(text);
+    } catch (e) {
+      showRestoreError('This file is not valid JSON and could not be read. No data was changed.');
+      return;
+    }
+
+    const error = validateBackupPayload(parsed);
+    if (error) {
+      showRestoreError(error + ' No data was changed.');
+      return;
+    }
+
+    // Valid -- hold the parsed data until the typed confirmation below;
+    // existing local data is untouched until doRestoreBackup() runs.
+    pendingRestoreData = parsed.data;
+    openRestorePanel();
+  }
+
+  function openRestorePanel() {
+    document.getElementById('restore-panel').classList.remove('hidden');
+    document.getElementById('restore-confirm-input').value = '';
+    document.getElementById('restore-confirm-btn').disabled = true;
+  }
+  function closeRestorePanel() {
+    document.getElementById('restore-panel').classList.add('hidden');
+    pendingRestoreData = null;
+  }
+  function onRestoreInputChange() {
+    const val = document.getElementById('restore-confirm-input').value.trim().toUpperCase();
+    document.getElementById('restore-confirm-btn').disabled = val !== 'RESTORE';
+  }
+  function doRestoreBackup() {
+    if (!pendingRestoreData) return;
+
+    // Serialize and write BEFORE touching the live appState. If either
+    // step fails (e.g. a storage quota error), nothing above has changed
+    // yet -- the current in-memory appState and whatever is already in
+    // localStorage are both left exactly as they were, and the failure is
+    // reported instead of silently treated as a success.
+    let serialized;
+    try {
+      serialized = JSON.stringify(pendingRestoreData);
+    } catch (e) {
+      showRestoreError('This backup could not be saved (its data could not be processed). No data was changed.');
+      return;
+    }
+
+    try {
+      localStorage.setItem(STORAGE_KEY, serialized);
+    } catch (e) {
+      showRestoreError('Could not save the restored backup to this device (storage may be full or unavailable). No data was changed -- your existing check-ins are untouched.');
+      return;
+    }
+
+    // Only reached once the write above is confirmed successful.
+    appState = pendingRestoreData;
+    pendingRestoreData = null;
+    // Reload rather than manually re-running every render function --
+    // this re-enters init() from a clean slate (migration, screen choice,
+    // every list/total re-rendered) exactly as a normal page load would.
+    location.reload();
   }
 
   init();
