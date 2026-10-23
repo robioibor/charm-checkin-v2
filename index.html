@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>CHaRM Live Check-In</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#2a78d6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="CHaRM Check-In">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
   .viz-root {
     color-scheme: light;
@@ -361,6 +367,8 @@
           <h2>Backup</h2>
           <button class="btn-secondary" style="width:100%; margin-bottom:12px;" onclick="exportCSV()">Export CSV</button>
           <button class="btn-secondary" style="width:100%; margin-bottom:12px;" onclick="downloadJsonBackup()">Download Full Backup (JSON)</button>
+          <button class="btn-secondary" style="width:100%; margin-bottom:12px;" onclick="checkForAppUpdate()">Check for App Updates</button>
+          <p class="muted hidden" id="update-status" style="margin-bottom:12px;"></p>
 
           <div class="field" style="margin-bottom:12px;">
             <label for="restore-file-input">Restore from Backup (JSON)</label>
@@ -1364,7 +1372,76 @@
     location.reload();
   }
 
+  /* ---------- Offline app shell: service worker + update check ---------- */
+  // Registering a service worker is what lets this app launch with no
+  // network at all (see sw.js). It's optional/best-effort: if service
+  // workers aren't supported in the current browsing context (e.g. a
+  // plain file:// open, or a browser without support), the app still
+  // works exactly as before, just without the offline-shell-cache
+  // benefit -- nothing below assumes it succeeded.
+
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('sw.js').then((registration) => {
+      registration.addEventListener('updatefound', () => {
+        const installing = registration.installing;
+        if (!installing) return;
+        installing.addEventListener('statechange', () => {
+          if (installing.state === 'installed' && registration.waiting) {
+            showUpdateStatus('An update is ready. It will apply next time this app is fully closed and reopened.');
+          }
+        });
+      });
+    }).catch(() => {
+      // No service worker this time -- the app continues to work normally.
+    });
+  }
+
+  // Explicit, user-triggered update check (the "controlled way to check
+  // for updates when online" from the Milestone 9 Step 4 plan). This only
+  // asks the browser to re-fetch sw.js and compare it; it never applies an
+  // update or reloads the page itself -- a new version always just waits
+  // until the app is fully closed and reopened, so an active event can
+  // never be interrupted by this.
+  function checkForAppUpdate() {
+    if (!('serviceWorker' in navigator)) {
+      showUpdateStatus('App updates are not available in this browsing mode.');
+      return;
+    }
+    navigator.serviceWorker.getRegistration().then((registration) => {
+      if (!registration) {
+        showUpdateStatus('No installed app shell to check yet.');
+        return;
+      }
+      showUpdateStatus('Checking for updates…');
+      registration
+        .update()
+        .then(() => {
+          if (registration.waiting) {
+            showUpdateStatus('An update is ready. It will apply next time this app is fully closed and reopened.');
+          } else if (registration.installing) {
+            // A new worker was found by update() but hasn't finished
+            // installing yet -- don't claim "latest version" while an
+            // update is still actively in progress.
+            showUpdateStatus('Update found -- finishing installation…');
+          } else {
+            showUpdateStatus('You already have the latest version.');
+          }
+        })
+        .catch(() => {
+          showUpdateStatus('Could not check for updates right now (no connection?).');
+        });
+    });
+  }
+
+  function showUpdateStatus(message) {
+    const el = document.getElementById('update-status');
+    el.textContent = message;
+    el.classList.remove('hidden');
+  }
+
   init();
+  registerServiceWorker();
 </script>
 </body>
 </html>
