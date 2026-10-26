@@ -237,6 +237,21 @@
   .active-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
   .active-toggle input { width: 18px; height: 18px; }
   .add-material-form { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--gridline); }
+
+  /* Payment (Milestone 9, Step 8) */
+  .payment-row { margin-bottom: 14px; }
+  .payment-row:last-child { margin-bottom: 0; }
+  .payment-method-group { display: flex; flex-wrap: wrap; gap: 6px; }
+  .payment-method-btn {
+    flex: 1 1 auto; min-width: 70px;
+    background: var(--page-plane); border: 1px solid var(--border); color: var(--text-primary);
+    font-size: 13.5px; font-weight: 600; padding: 10px 6px; min-height: 44px;
+  }
+  .payment-method-btn.active { background: var(--series-1); color: #fff; border-color: var(--series-1); }
+  .payment-amount-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .payment-amount-row .price-input { width: 120px; }
+  .discrepancy-reason-group { display: flex; gap: 8px; flex-wrap: wrap; }
+  .discrepancy-btn.active { background: var(--critical); color: #fff; border-color: var(--critical); }
 </style>
 </head>
 <body>
@@ -326,6 +341,38 @@
             <span id="vehicle-subtotal">$0.00</span>
           </div>
         </div>
+
+        <div class="card" id="payment-card">
+          <h2>Payment</h2>
+          <p class="muted" id="payment-no-due">No payment due for this check-in.</p>
+          <div class="hidden" id="payment-interactive">
+            <div id="payment-rows"></div>
+            <div class="field hidden" id="add-split-wrap" style="margin-top:4px; margin-bottom:0;">
+              <button type="button" class="btn-link" onclick="addPaymentRow()">+ Split this payment</button>
+            </div>
+            <div class="subtotal-line">
+              <span>Collected</span>
+              <span id="payment-collected-amount">$0.00</span>
+            </div>
+            <p class="muted hidden" id="payment-overpay-hint" style="margin-top:8px;">Amount collected is more than the amount due. Add the difference to General Donation above, or adjust a payment amount, before recording.</p>
+            <div class="hidden" id="discrepancy-section" style="margin-top:14px; padding-top:14px; border-top:1px solid var(--gridline);">
+              <label>Amount collected doesn't match amount due. Why? <span class="required-mark">*</span></label>
+              <div class="discrepancy-reason-group">
+                <button type="button" class="btn-secondary discrepancy-btn" id="discrepancy-btn-not_collected" onclick="selectDiscrepancyReason('not_collected')">Not Collected</button>
+                <button type="button" class="btn-secondary discrepancy-btn" id="discrepancy-btn-waived" onclick="selectDiscrepancyReason('waived')">Waived</button>
+                <button type="button" class="btn-secondary discrepancy-btn" id="discrepancy-btn-other" onclick="selectDiscrepancyReason('other')">Other</button>
+              </div>
+              <div class="field hidden" id="discrepancy-note-field" style="margin-top:10px; margin-bottom:0;">
+                <label for="discrepancy-note">Explanation <span class="required-mark">*</span></label>
+                <input type="text" id="discrepancy-note" placeholder="Explain the discrepancy">
+              </div>
+            </div>
+          </div>
+          <div class="field hidden" id="correction-note-field" style="margin-top:14px; margin-bottom:0;">
+            <label for="correction-note">Correction note (optional)</label>
+            <input type="text" id="correction-note" placeholder="Why is this payment being corrected?">
+          </div>
+        </div>
       </div>
 
       <!-- Totals tab -->
@@ -339,8 +386,12 @@
           <div id="referral-breakdown"><p class="muted">No entries yet.</p></div>
         </div>
         <div class="card">
-          <h2>Donations Received</h2>
+          <h2>Fees &amp; Donations Due</h2>
           <div id="donation-breakdown"></div>
+        </div>
+        <div class="card">
+          <h2>Payment Reconciliation</h2>
+          <div id="payment-breakdown"></div>
         </div>
         <div class="card">
           <h2>Recent Check-Ins</h2>
@@ -429,6 +480,19 @@
     { id: 'crt', label: 'CRT', price: 15, active: true },
   ];
 
+  // Fixed payment methods (Milestone 9, Step 8) -- deliberately NOT a
+  // managed catalog like materialTypes/referralSources. This list is
+  // small, fixed, and matches sql/007's seeded payment_methods rows
+  // exactly (same ids) for trivial future sync -- there's no per-event
+  // customization need the way there is for fee materials.
+  const PAYMENT_METHODS = [
+    { id: 'cash', label: 'Cash' },
+    { id: 'card', label: 'Credit/Debit Card' },
+    { id: 'venmo', label: 'Venmo' },
+    { id: 'paypal', label: 'PayPal' },
+    { id: 'other', label: 'Other' },
+  ];
+
   // Starting referral/marketing sources — teams can add/edit/deactivate more from "Manage Referral Sources".
   // promptsForDetail marks the one option that reveals the "which program" follow-up field.
   const DEFAULT_REFERRAL_SOURCES = [
@@ -464,6 +528,16 @@
   // something else changed storage before retrying a save -- see
   // countVehicle()'s persistence-retry guard.
   let lastKnownStorageRaw = null;
+  // Ephemeral check-in-form payment state (Milestone 9, Step 8) --
+  // mirrors how qty/zip/donation inputs already live directly in the
+  // DOM rather than appState; this one array drives the dynamically
+  // sized set of payment rows, rebuilt by resetCheckinForm()/editEntry()
+  // and converted into a real entry.payments array only at save time.
+  let paymentFormRows = [{ methodId: null, amount: null }];
+  // The selected reason for a payment shortfall on the check-in form
+  // currently being filled out ('not_collected' | 'waived' | 'other' |
+  // null). Reset alongside paymentFormRows.
+  let discrepancyReason = null;
 
   function loadState() {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -553,6 +627,50 @@
     if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null;
     const p = Number(trimmed);
     return Number.isFinite(p) ? p : null;
+  }
+
+  // Same strict format as parseValidPrice, but requires a STRICTLY
+  // positive amount -- used for payment and discrepancy amounts,
+  // matching sql/008's `check (amount > 0)` on payments and
+  // payment_allocations. A $0 payment or discrepancy amount is
+  // meaningless and should simply not exist as a row.
+  function parseValidPositiveAmount(rawValue) {
+    const p = parseValidPrice(rawValue);
+    return (p !== null && p > 0) ? p : null;
+  }
+
+  function getPaymentMethodLabel(id) {
+    const pm = PAYMENT_METHODS.find(p => p.id === id);
+    return pm ? pm.label : id;
+  }
+
+  // The "effective" payment picture for an entry: its latest correction
+  // if any exist, otherwise its original recorded payments/discrepancy.
+  // `tracked: false` means this entry predates payment tracking entirely
+  // (Milestone 9, Step 8) -- callers must never treat that the same as
+  // "zero collected" or "unpaid"; it means genuinely unknown.
+  function getEffectivePayment(entry) {
+    if (entry.payments === undefined) return { tracked: false, payments: [], discrepancy: null };
+    if (entry.paymentCorrections && entry.paymentCorrections.length) {
+      const last = entry.paymentCorrections[entry.paymentCorrections.length - 1];
+      return { tracked: true, payments: last.payments, discrepancy: last.discrepancy };
+    }
+    return { tracked: true, payments: entry.payments || [], discrepancy: entry.discrepancy || null };
+  }
+
+  // Order-independent comparison of two payment arrays -- ignores `id`
+  // (freshly generated every save, never meaningful to compare) and only
+  // compares method+amount pairs as an unordered multiset.
+  function paymentsMatch(a, b) {
+    if (a.length !== b.length) return false;
+    const normalize = (arr) => arr.map(p => p.methodId + ':' + p.amount).slice().sort().join('|');
+    return normalize(a) === normalize(b);
+  }
+
+  function discrepancyMatch(a, b) {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return a.reasonType === b.reasonType && a.amount === b.amount && (a.note || '') === (b.note || '');
   }
 
   function showInitError(message) {
@@ -874,6 +992,22 @@
     updateSubtotal();
   }
 
+  // Pure computation of the current check-in's amount due -- identical
+  // logic to updateSubtotal(), but without any DOM writes, so payment-row
+  // functions (addPaymentRow, etc.) can read the due amount without
+  // triggering a render loop back through updateSubtotal() -> renderPaymentSection().
+  function computeCheckinDue() {
+    let total = 0;
+    getActiveMaterials().forEach(m => {
+      const el = document.getElementById('qty-' + m.id);
+      if (!el) return;
+      const qty = Math.max(0, parseInt(el.value, 10) || 0);
+      total += qty * getEventPrice(m.id);
+    });
+    total += Math.max(0, parseFloat(document.getElementById('input-general-donation').value) || 0);
+    return total;
+  }
+
   function updateSubtotal() {
     let total = 0;
     getActiveMaterials().forEach(m => {
@@ -889,7 +1023,114 @@
     total += general;
     document.getElementById('vehicle-subtotal').textContent = fmtUsd(total);
     document.getElementById('sticky-subtotal').textContent = fmtUsd(total);
+    // Amount due may have just changed (materials/donation edit) --
+    // recalculate and re-validate the effective payment/discrepancy
+    // state every time, whether on the initial form or mid-edit.
+    renderPaymentSection(total);
     return total;
+  }
+
+  /* ---------- Payment (Milestone 9, Step 8) ---------- */
+
+  // Shows "No payment due" and skips all interactive payment UI when due
+  // is $0 (zero friction for a free check-in); otherwise renders the
+  // payment rows and their live reconciliation state.
+  function renderPaymentSection(due) {
+    const dueIsZero = due <= 0;
+    document.getElementById('payment-no-due').classList.toggle('hidden', !dueIsZero);
+    document.getElementById('payment-interactive').classList.toggle('hidden', dueIsZero);
+    if (dueIsZero) return;
+    renderPaymentRows();
+  }
+
+  function renderPaymentRows() {
+    const container = document.getElementById('payment-rows');
+    const splitMode = paymentFormRows.length > 1;
+    container.innerHTML = paymentFormRows.map((row, i) => `
+      <div class="payment-row">
+        <div class="payment-method-group">
+          ${PAYMENT_METHODS.map(pm => `
+            <button type="button" class="payment-method-btn${row.methodId === pm.id ? ' active' : ''}" onclick="selectPaymentMethod(${i}, '${pm.id}')">${escapeHtml(pm.label)}</button>
+          `).join('')}
+        </div>
+        ${splitMode ? `
+          <div class="payment-amount-row">
+            <div class="price-input">
+              <span>$</span>
+              <input type="number" min="0" step="0.01" inputmode="decimal" value="${row.amount === null ? '' : row.amount}" placeholder="0.00" oninput="onPaymentAmountInput(${i}, this.value)">
+            </div>
+            ${i > 0 ? `<button type="button" class="btn-icon-sm" onclick="removePaymentRow(${i})">Remove</button>` : ''}
+          </div>
+        ` : ''}
+      </div>
+    `).join('');
+    document.getElementById('add-split-wrap').classList.toggle('hidden', paymentFormRows.length >= PAYMENT_METHODS.length);
+    updatePaymentSummary();
+  }
+
+  // Lightweight refresh of just the collected/due comparison and the
+  // discrepancy section's visibility -- deliberately does NOT touch
+  // #payment-rows' HTML, so it's safe to call on every keystroke in an
+  // amount field without losing focus/cursor position.
+  function updatePaymentSummary() {
+    const due = computeCheckinDue();
+    let collected;
+    if (paymentFormRows.length > 1) {
+      collected = paymentFormRows.reduce((sum, r) => sum + (typeof r.amount === 'number' ? r.amount : 0), 0);
+    } else {
+      // Single-method mode: the amount is implicitly the full due amount,
+      // but ONLY once a method has actually been selected -- an
+      // untouched row means nothing has been collected yet.
+      collected = paymentFormRows[0].methodId ? due : 0;
+    }
+    document.getElementById('payment-collected-amount').textContent = fmtUsd(collected);
+
+    const diff = round2(due - collected); // > 0 shortfall, < 0 overpaid
+    const shortfall = diff > 0.004;
+    const overpaid = diff < -0.004;
+
+    document.getElementById('payment-overpay-hint').classList.toggle('hidden', !overpaid);
+    document.getElementById('discrepancy-section').classList.toggle('hidden', !shortfall);
+    if (!shortfall) discrepancyReason = null;
+
+    ['not_collected', 'waived', 'other'].forEach(r => {
+      document.getElementById('discrepancy-btn-' + r).classList.toggle('active', r === discrepancyReason);
+    });
+    document.getElementById('discrepancy-note-field').classList.toggle('hidden', discrepancyReason !== 'other');
+  }
+
+  function selectPaymentMethod(i, methodId) {
+    paymentFormRows[i].methodId = methodId;
+    renderPaymentRows();
+  }
+
+  function onPaymentAmountInput(i, value) {
+    const n = parseFloat(value);
+    paymentFormRows[i].amount = (isFinite(n) && n >= 0) ? n : null;
+    updatePaymentSummary();
+  }
+
+  function addPaymentRow() {
+    if (paymentFormRows.length >= PAYMENT_METHODS.length) return;
+    if (paymentFormRows.length === 1 && paymentFormRows[0].amount === null) {
+      // First split: the existing single row becomes explicit, pre-filled
+      // with the full amount due so the volunteer only has to adjust it.
+      paymentFormRows[0].amount = computeCheckinDue();
+    }
+    paymentFormRows.push({ methodId: null, amount: 0 });
+    renderPaymentRows();
+  }
+
+  function removePaymentRow(i) {
+    if (i === 0 || paymentFormRows.length <= 1) return;
+    paymentFormRows.splice(i, 1);
+    if (paymentFormRows.length === 1) paymentFormRows[0].amount = null;
+    renderPaymentRows();
+  }
+
+  function selectDiscrepancyReason(reason) {
+    discrepancyReason = reason;
+    updatePaymentSummary();
   }
 
   function resetCheckinForm() {
@@ -903,6 +1144,11 @@
       if (el) el.value = 0;
     });
     document.getElementById('input-general-donation').value = '';
+    paymentFormRows = [{ methodId: null, amount: null }];
+    discrepancyReason = null;
+    document.getElementById('discrepancy-note').value = '';
+    document.getElementById('correction-note').value = '';
+    document.getElementById('correction-note-field').classList.add('hidden');
     updateSubtotal();
     document.getElementById('input-zip').focus();
   }
@@ -1035,15 +1281,106 @@
     const generalDonation = Math.max(0, parseFloat(document.getElementById('input-general-donation').value) || 0);
     const totalMoney = Object.values(materials).reduce((sum, m) => sum + m.fee, 0) + generalDonation;
 
+    // Build the payment rows from the live form state (Milestone 9, Step
+    // 8). A check-in is saveable even with partial or missing payment --
+    // the only thing that can block it here is a shortfall with no
+    // reason selected, or an unreconciled overpayment.
+    let payments = [];
+    if (totalMoney > 0) {
+      const isSplit = paymentFormRows.length > 1;
+      for (let i = 0; i < paymentFormRows.length; i++) {
+        const row = paymentFormRows[i];
+        if (!isSplit) {
+          // Single-method mode: nothing selected means nothing was
+          // collected -- allowed; the discrepancy check below will
+          // require a reason for the full amount due.
+          if (row.methodId) {
+            payments.push({ id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()), methodId: row.methodId, amount: totalMoney });
+          }
+          break;
+        }
+        // Split mode: an unused extra row (added via "+ Split" then left
+        // blank) is simply skipped rather than erroring.
+        const amountEntered = (typeof row.amount === 'number') ? row.amount : 0;
+        if (!row.methodId && amountEntered <= 0) continue;
+        if (!row.methodId) {
+          showCheckinError('Please select a payment method for each payment row with an amount, or remove it.');
+          return;
+        }
+        const amt = parseValidPositiveAmount(String(amountEntered));
+        if (amt === null) {
+          showCheckinError('Enter a valid payment amount (0.01 or more, at most two decimal places) for each payment row.');
+          return;
+        }
+        payments.push({ id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()), methodId: row.methodId, amount: amt });
+      }
+    }
+
+    const collected = payments.reduce((sum, p) => sum + p.amount, 0);
+    const diff = round2(totalMoney - collected); // > 0 shortfall, < 0 overpaid
+
+    let discrepancy = null;
+    if (diff > 0.004) {
+      if (!discrepancyReason) {
+        showCheckinError('Payment collected doesn’t match the amount due. Please select a reason: Not Collected, Waived, or Other.');
+        return;
+      }
+      const discrepancyNote = document.getElementById('discrepancy-note').value.trim();
+      if (discrepancyReason === 'other' && !discrepancyNote) {
+        showCheckinError('Please explain the "Other" payment discrepancy.');
+        return;
+      }
+      discrepancy = {
+        id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+        reasonType: discrepancyReason,
+        amount: diff,
+        note: discrepancyNote,
+      };
+    } else if (diff < -0.004) {
+      // Overpayment is blocked outright -- never saved as a mismatch to
+      // explain away. The volunteer must reconcile it first, either by
+      // raising General Donation to match or adjusting a payment amount.
+      showCheckinError('Amount collected is more than the amount due. Add the difference to General Donation, or adjust a payment amount, before recording.');
+      return;
+    }
+
     let proposedEntries;
     if (existingEntry) {
-      const updatedEntry = { ...existingEntry, zip, referralSourceId, referralOther, materials, generalDonation, totalMoney };
+      const previousEffective = getEffectivePayment(existingEntry);
+      const paymentsChanged = !paymentsMatch(previousEffective.payments, payments) || !discrepancyMatch(previousEffective.discrepancy, discrepancy);
+
+      let updatedEntry;
+      if (!previousEffective.tracked || !paymentsChanged) {
+        // Either this entry predates payment tracking (this edit is the
+        // first time payment info is recorded for it -- nothing to
+        // preserve yet) or the payment picture is unchanged (editing an
+        // unrelated field must never create a correction). Either way:
+        // write payments/discrepancy directly, no correction record.
+        updatedEntry = { ...existingEntry, zip, referralSourceId, referralOther, materials, generalDonation, totalMoney, payments, discrepancy };
+      } else {
+        // The payment picture actually changed on an entry that already
+        // had a recorded original -- preserve that original (and any
+        // prior corrections) untouched, and append a new correction
+        // snapshot instead of overwriting entry.payments/discrepancy.
+        const correctionNote = document.getElementById('correction-note').value.trim();
+        const newCorrection = {
+          id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+          timestamp: new Date().toISOString(),
+          payments, discrepancy, note: correctionNote,
+        };
+        updatedEntry = {
+          ...existingEntry,
+          zip, referralSourceId, referralOther, materials, generalDonation, totalMoney,
+          paymentCorrections: [...(existingEntry.paymentCorrections || []), newCorrection],
+        };
+      }
       proposedEntries = appState.entries.map(e => (e.id === existingEntry.id ? updatedEntry : e));
     } else {
       const newEntry = {
         id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
         timestamp: new Date().toISOString(),
         zip, referralSourceId, referralOther, materials, generalDonation, totalMoney,
+        payments, discrepancy,
       };
       proposedEntries = [...appState.entries, newEntry];
     }
@@ -1129,7 +1466,33 @@
       grandTotal += e.totalMoney || 0;
     });
 
-    return { zipList, referralTotals, materialTotals, generalTotal, grandTotal };
+    // Payment reconciliation totals (Milestone 9, Step 8). Entries that
+    // predate payment tracking are counted separately (unknownCount) and
+    // never folded into "outstanding" or any other bucket -- an unknown
+    // historical total is not evidence either way.
+    const paymentMethodTotals = {};
+    PAYMENT_METHODS.forEach(pm => { paymentMethodTotals[pm.id] = { label: pm.label, amount: 0 }; });
+    let collectedTotal = 0, outstandingTotal = 0, waivedTotal = 0, needsReviewTotal = 0;
+    let unknownCount = 0, outstandingCount = 0, waivedCount = 0, needsReviewCount = 0;
+    entries.forEach(e => {
+      const eff = getEffectivePayment(e);
+      if (!eff.tracked) { unknownCount++; return; }
+      eff.payments.forEach(p => {
+        collectedTotal += p.amount;
+        if (paymentMethodTotals[p.methodId]) paymentMethodTotals[p.methodId].amount += p.amount;
+      });
+      if (eff.discrepancy) {
+        if (eff.discrepancy.reasonType === 'not_collected') { outstandingTotal += eff.discrepancy.amount; outstandingCount++; }
+        else if (eff.discrepancy.reasonType === 'waived') { waivedTotal += eff.discrepancy.amount; waivedCount++; }
+        else { needsReviewTotal += eff.discrepancy.amount; needsReviewCount++; }
+      }
+    });
+
+    return {
+      zipList, referralTotals, materialTotals, generalTotal, grandTotal,
+      paymentMethodTotals, collectedTotal, outstandingTotal, waivedTotal, needsReviewTotal,
+      unknownCount, outstandingCount, waivedCount, needsReviewCount,
+    };
   }
 
   function renderBars(container, list) {
@@ -1163,10 +1526,25 @@
       return `<div class="stat-row"><span>${escapeHtml(d.label)}s: ${d.qty} collected${tag}</span><span>${fmtUsd(d.fee)}</span></div>`;
     }).join('');
     donHtml += `<div class="stat-row"><span>General URA Donations</span><span>${fmtUsd(t.generalTotal)}</span></div>`;
-    donHtml += `<div class="grand-total"><span>Total Donations/Fees Received</span><span>${fmtUsd(t.grandTotal)}</span></div>`;
+    donHtml += `<div class="grand-total"><span>Total Donations/Fees Due</span><span>${fmtUsd(t.grandTotal)}</span></div>`;
     donEl.innerHTML = donHtml;
 
+    renderPaymentBreakdown(t);
     renderRecentEntries();
+  }
+
+  function renderPaymentBreakdown(t) {
+    const el = document.getElementById('payment-breakdown');
+    let html = PAYMENT_METHODS.map(pm => {
+      const amt = t.paymentMethodTotals[pm.id].amount;
+      return `<div class="stat-row"><span>${escapeHtml(pm.label)}</span><span>${fmtUsd(amt)}</span></div>`;
+    }).join('');
+    html += `<div class="stat-row"><span>Total Collected</span><span>${fmtUsd(t.collectedTotal)}</span></div>`;
+    html += `<div class="stat-row"><span>Outstanding (Not Collected)${t.outstandingCount ? ' · ' + t.outstandingCount : ''}</span><span>${fmtUsd(t.outstandingTotal)}</span></div>`;
+    html += `<div class="stat-row"><span>Waived${t.waivedCount ? ' · ' + t.waivedCount : ''}</span><span>${fmtUsd(t.waivedTotal)}</span></div>`;
+    html += `<div class="stat-row"><span>Needs Review (Other)${t.needsReviewCount ? ' · ' + t.needsReviewCount : ''}</span><span>${fmtUsd(t.needsReviewTotal)}</span></div>`;
+    html += `<div class="stat-row"><span>Payment Unknown (predates tracking)</span><span>${t.unknownCount}</span></div>`;
+    el.innerHTML = html;
   }
 
   function renderRecentEntries() {
@@ -1183,10 +1561,28 @@
       const time = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const referral = getReferralSourceLabel(e.referralSourceId);
       const referralDetail = e.referralOther ? ` — ${escapeHtml(e.referralOther)}` : '';
+
+      const eff = getEffectivePayment(e);
+      const methodsLabel = eff.payments.length ? eff.payments.map(p => getPaymentMethodLabel(p.methodId)).join(' + ') : '';
+      let paymentSummary;
+      if (!eff.tracked) {
+        paymentSummary = 'Payment not recorded';
+      } else if (eff.discrepancy) {
+        const reasonLabel = eff.discrepancy.reasonType === 'not_collected' ? 'Not Collected'
+          : eff.discrepancy.reasonType === 'waived' ? 'Waived' : 'Other';
+        paymentSummary = (methodsLabel ? methodsLabel + ' + ' : '') + reasonLabel + ' ' + fmtUsd(eff.discrepancy.amount);
+      } else if (methodsLabel) {
+        paymentSummary = methodsLabel;
+      } else {
+        paymentSummary = 'No payment due';
+      }
+      const correctedTag = (e.paymentCorrections && e.paymentCorrections.length) ? ' (corrected)' : '';
+
       return `
         <div class="entry-item">
           <div class="entry-top"><span>ZIP ${escapeHtml(e.zip)} · ${time}</span><span>${fmtUsd(e.totalMoney)}</span></div>
           <div class="entry-detail">${escapeHtml(referral)}${referralDetail}${materialsSummary ? ' · ' + escapeHtml(materialsSummary) : ''}</div>
+          <div class="entry-detail">${escapeHtml(paymentSummary)}${escapeHtml(correctedTag)}</div>
           <div class="entry-actions">
             <button class="btn-icon-sm" onclick="editEntry('${e.id}')">Edit</button>
             <button class="btn-icon-sm" onclick="deleteEntry('${e.id}')">Delete</button>
@@ -1211,6 +1607,24 @@
       if (el) el.value = (entry.materials[m.id] && entry.materials[m.id].qty) || 0;
     });
     document.getElementById('input-general-donation').value = entry.generalDonation || '';
+
+    const effective = getEffectivePayment(entry);
+    if (effective.tracked && effective.payments.length) {
+      paymentFormRows = effective.payments.map(p => ({ methodId: p.methodId, amount: p.amount }));
+      if (paymentFormRows.length === 1) {
+        // Still shown in single-method mode (no visible amount field) --
+        // the implicit amount is recomputed live from the current due
+        // amount, same as a brand-new single-method check-in.
+        paymentFormRows[0].amount = null;
+      }
+    } else {
+      paymentFormRows = [{ methodId: null, amount: null }];
+    }
+    discrepancyReason = effective.discrepancy ? effective.discrepancy.reasonType : null;
+    document.getElementById('discrepancy-note').value = effective.discrepancy ? (effective.discrepancy.note || '') : '';
+    document.getElementById('correction-note').value = '';
+    document.getElementById('correction-note-field').classList.remove('hidden');
+
     updateSubtotal();
 
     document.getElementById('edit-banner').classList.remove('hidden');
@@ -1439,7 +1853,7 @@
     rows.push(['City / Location', info.city || '']);
     rows.push(['Partner Organization', info.partnerOrg || '']);
     rows.push(['Total Check-Ins', appState.entries.length]);
-    rows.push(['Total Donations/Fees Received', fmtUsdWhole(t.grandTotal)]);
+    rows.push(['Total Donations/Fees Due', fmtUsdWhole(t.grandTotal)]);
     rows.push([]);
 
     // --- 2. ZIP Code Summary ---
@@ -1475,14 +1889,25 @@
       rows.push([label, d.qty, fmtUsdWhole(getEventPrice(m.id)), fmtUsdWhole(d.fee)]);
     });
     rows.push(['General URA Donations', '', '', fmtUsdWhole(t.generalTotal)]);
-    rows.push(['Total Donations/Fees Received', '', '', fmtUsdWhole(t.grandTotal)]);
+    rows.push(['Total Donations/Fees Due', '', '', fmtUsdWhole(t.grandTotal)]);
     rows.push([]);
 
-    // --- 5. Detailed Check-In Records ---
+    // --- 5. Payment Reconciliation ---
+    rows.push(['Payment Reconciliation']);
+    rows.push(['Method', 'Amount Collected']);
+    PAYMENT_METHODS.forEach(pm => rows.push([pm.label, fmtUsdWhole(t.paymentMethodTotals[pm.id].amount)]));
+    rows.push(['Total Collected', fmtUsdWhole(t.collectedTotal)]);
+    rows.push(['Outstanding (Not Collected)', fmtUsdWhole(t.outstandingTotal)]);
+    rows.push(['Waived', fmtUsdWhole(t.waivedTotal)]);
+    rows.push(['Needs Review (Other)', fmtUsdWhole(t.needsReviewTotal)]);
+    rows.push(['Payment Unknown (predates tracking)', t.unknownCount]);
+    rows.push([]);
+
+    // --- 6. Detailed Check-In Records ---
     rows.push(['Detailed Check-In Records']);
     const header = ['Timestamp', 'ZIP Code', 'How They Heard About the Event', 'Referral Detail'];
     appState.materialTypes.forEach(m => { header.push(m.label + ' Qty', m.label + ' Fee'); });
-    header.push('General Donation', 'Total Money Received');
+    header.push('General Donation', 'Total Amount Due', 'Payment Method(s)', 'Amount Collected', 'Discrepancy Reason', 'Discrepancy Amount', 'Discrepancy Note', 'Corrected');
     rows.push(header);
 
     appState.entries.forEach(e => {
@@ -1497,6 +1922,25 @@
         row.push(md.qty, md.fee.toFixed(2));
       });
       row.push((e.generalDonation || 0).toFixed(2), (e.totalMoney || 0).toFixed(2));
+
+      // Payment columns never assume a historical total was actually
+      // collected -- an untracked entry gets "Not recorded", not $0.00.
+      const eff = getEffectivePayment(e);
+      if (!eff.tracked) {
+        row.push('Not recorded', '', '', '', '', (e.paymentCorrections && e.paymentCorrections.length) ? 'Yes' : 'No');
+      } else {
+        const methodsLabel = eff.payments.length
+          ? eff.payments.map(p => getPaymentMethodLabel(p.methodId) + ' (' + fmtUsd(p.amount) + ')').join(', ')
+          : '(none)';
+        row.push(
+          methodsLabel,
+          eff.payments.reduce((sum, p) => sum + p.amount, 0).toFixed(2),
+          eff.discrepancy ? eff.discrepancy.reasonType : '',
+          eff.discrepancy ? eff.discrepancy.amount.toFixed(2) : '',
+          eff.discrepancy ? (eff.discrepancy.note || '') : '',
+          (e.paymentCorrections && e.paymentCorrections.length) ? 'Yes' : 'No'
+        );
+      }
       rows.push(row);
     });
 
@@ -1571,6 +2015,36 @@
 
   function isPlainObject(v) {
     return v !== null && typeof v === 'object' && !Array.isArray(v);
+  }
+
+  // Validates the shape of a discrepancy object (or null/undefined,
+  // which are fine -- a discrepancy is optional). Shared between the
+  // top-level entry.discrepancy and each paymentCorrections entry.
+  function validateDiscrepancyShape(discrepancy, label) {
+    if (discrepancy === undefined || discrepancy === null) return null;
+    if (!isPlainObject(discrepancy)) return `${label} has invalid discrepancy data.`;
+    if (typeof discrepancy.id !== 'string' || !discrepancy.id) return `${label}'s discrepancy is missing a valid id.`;
+    if (['not_collected', 'waived', 'other'].indexOf(discrepancy.reasonType) === -1) {
+      return `${label} has an invalid discrepancy reason.`;
+    }
+    if (typeof discrepancy.amount !== 'number' || discrepancy.amount <= 0) return `${label} has an invalid discrepancy amount.`;
+    if (discrepancy.note !== undefined && typeof discrepancy.note !== 'string') return `${label} has an invalid discrepancy note.`;
+    if (discrepancy.reasonType === 'other' && !discrepancy.note) return `${label}'s "Other" discrepancy is missing its required explanation.`;
+    return null;
+  }
+
+  // Validates an array of payment rows ({id, methodId, amount>0}).
+  // Shared between entry.payments and each paymentCorrections entry.
+  function validatePaymentsShape(payments, label) {
+    if (!Array.isArray(payments)) return `${label} has invalid payment data.`;
+    for (let j = 0; j < payments.length; j++) {
+      const p = payments[j];
+      if (!isPlainObject(p)) return `${label}'s payment #${j + 1} is not valid.`;
+      if (typeof p.id !== 'string' || !p.id) return `${label}'s payment #${j + 1} is missing a valid id.`;
+      if (typeof p.methodId !== 'string' || !p.methodId) return `${label}'s payment #${j + 1} is missing a valid method.`;
+      if (typeof p.amount !== 'number' || p.amount <= 0) return `${label}'s payment #${j + 1} has an invalid amount.`;
+    }
+    return null;
   }
 
   // Checks the backup envelope AND the structure of everything inside
@@ -1649,6 +2123,35 @@
       }
       if (e.totalMoney !== undefined && e.totalMoney !== null && typeof e.totalMoney !== 'number') {
         return `Check-in #${i + 1} has an invalid total amount.`;
+      }
+
+      // Payment tracking (Milestone 9, Step 8) is entirely optional --
+      // an older backup, or one from before this entry was ever paid,
+      // simply won't have these fields, and that must stay "payment
+      // unknown" through restore, never treated as "unpaid".
+      if (e.payments !== undefined) {
+        const paymentsError = validatePaymentsShape(e.payments, `Check-in #${i + 1}`);
+        if (paymentsError) return paymentsError;
+      }
+      const discrepancyError = validateDiscrepancyShape(e.discrepancy, `Check-in #${i + 1}`);
+      if (discrepancyError) return discrepancyError;
+      if (e.paymentCorrections !== undefined) {
+        if (!Array.isArray(e.paymentCorrections)) return `Check-in #${i + 1} has invalid payment correction history.`;
+        for (let k = 0; k < e.paymentCorrections.length; k++) {
+          const c = e.paymentCorrections[k];
+          if (!isPlainObject(c)) return `Check-in #${i + 1}'s correction #${k + 1} is not valid.`;
+          if (typeof c.id !== 'string' || !c.id) return `Check-in #${i + 1}'s correction #${k + 1} is missing a valid id.`;
+          if (typeof c.timestamp !== 'string' || isNaN(Date.parse(c.timestamp))) {
+            return `Check-in #${i + 1}'s correction #${k + 1} has an invalid timestamp.`;
+          }
+          const correctionPaymentsError = validatePaymentsShape(c.payments, `Check-in #${i + 1}'s correction #${k + 1}`);
+          if (correctionPaymentsError) return correctionPaymentsError;
+          const correctionDiscrepancyError = validateDiscrepancyShape(c.discrepancy, `Check-in #${i + 1}'s correction #${k + 1}`);
+          if (correctionDiscrepancyError) return correctionDiscrepancyError;
+          if (c.note !== undefined && typeof c.note !== 'string') {
+            return `Check-in #${i + 1}'s correction #${k + 1} has an invalid note.`;
+          }
+        }
       }
     }
 
