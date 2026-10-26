@@ -16,7 +16,15 @@
 // ask the browser to check for a new version while online, without ever
 // triggering a reload itself.
 
-const CACHE_NAME = 'charm-checkin-v2-shell-v1';
+// IMPORTANT: the browser only checks THIS file's own bytes to decide
+// whether a new service worker version exists at all -- it never looks
+// at index.html, manifest.json, or the icons to make that decision. A
+// content-only change to one of those files, with no change here, will
+// never be detected or re-cached (this is exactly what happened in the
+// Milestone 9 Step 5 deploy). Bump this version string (...-v3, -v4, ...)
+// every time index.html, manifest.json, or either icon changes, even if
+// nothing in this file's own logic needs to change.
+const CACHE_NAME = 'charm-checkin-v2-shell-v2';
 const SHELL_FILES = [
   './',
   './index.html',
