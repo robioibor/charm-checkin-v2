@@ -241,6 +241,11 @@
 
   <div class="wrap">
 
+    <!-- Always reachable regardless of which screen (if any) is shown --
+         a catastrophic load failure must still be visible even when
+         neither setup-screen nor app-screen has been shown yet. -->
+    <p class="error hidden" id="init-error"></p>
+
     <!-- Event setup screen -->
     <div id="setup-screen" class="card hidden">
       <h1 id="setup-title">Start New Event</h1>
@@ -445,6 +450,16 @@
   let editingEntryId = null;
   let isEditingSetupOnly = false;
   let lastCountAt = 0;
+  // Whether the current event's id is confirmed written to localStorage
+  // (not just sitting in memory). Starts true (the common case -- an
+  // event whose id was already confirmed in a prior session); only ever
+  // set false by init() when a freshly backfilled id fails to save.
+  let eventIdConfirmedPersisted = true;
+  // The raw string currently believed to be on disk, kept in sync by
+  // trySaveState() on every successful write. Used to detect whether
+  // something else changed storage before retrying a save -- see
+  // countVehicle()'s persistence-retry guard.
+  let lastKnownStorageRaw = null;
 
   function loadState() {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -452,7 +467,54 @@
     try { return JSON.parse(raw); } catch (e) { return null; }
   }
   function saveState() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+    const serialized = JSON.stringify(appState);
+    localStorage.setItem(STORAGE_KEY, serialized);
+    // Only reached if the write above didn't throw -- keeps the
+    // conflict-detection baseline in sync with every successful save,
+    // not just the ones that go through trySaveState().
+    lastKnownStorageRaw = serialized;
+  }
+
+  // Attempts to persist the given state object (which may be a proposed
+  // state, not necessarily the live appState -- callers can confirm a
+  // save succeeds before committing to it). Returns true only once the
+  // write is confirmed to have succeeded. Used specifically where a
+  // generated identifier (e.g. a new event's id) must not be treated as
+  // persistent until the write is confirmed -- see saveSetup() and init().
+  function trySaveState(stateToSave) {
+    try {
+      const serialized = JSON.stringify(stateToSave);
+      localStorage.setItem(STORAGE_KEY, serialized);
+      lastKnownStorageRaw = serialized;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Whether a value is a properly formatted UUID (any RFC 4122 variant,
+  // not just v4) -- used to validate event ids both when backfilling them
+  // locally and when one arrives via a restored backup.
+  function isValidUuid(value) {
+    return typeof value === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  }
+
+  // Generates a new event id. Deliberately does NOT fall back to the
+  // Date.now()+Math.random() pattern used elsewhere for entry ids, since
+  // that fallback isn't UUID-shaped and events.id in the shared database
+  // is a uuid column -- returns null if a real UUID can't be generated,
+  // which callers must treat as a hard failure, not a silent substitute.
+  function generateEventId() {
+    if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') return null;
+    return crypto.randomUUID();
+  }
+
+  function showInitError(message) {
+    const el = document.getElementById('init-error');
+    if (!el) return;
+    el.textContent = message;
+    el.classList.remove('hidden');
   }
 
   function fmtUsd(n) { return '$' + Number(n || 0).toFixed(2); }
@@ -490,6 +552,13 @@
     if (!appState.referralSources || !appState.referralSources.length) {
       appState.referralSources = DEFAULT_REFERRAL_SOURCES.map(s => ({ ...s }));
     }
+    // Backfill a stable id for an existing event that doesn't have one yet,
+    // or whose id isn't a validly-formatted UUID (e.g. an older backup).
+    // Generated once -- every later launch loads this same id back in from
+    // localStorage before this check runs again, so it never changes.
+    if (appState.eventInfo && !isValidUuid(appState.eventInfo.id)) {
+      appState.eventInfo.id = generateEventId();
+    }
     // Backfill any older entries that stored raw referral text instead of a source id,
     // so nothing gets lost if the data format changes again in the future.
     appState.entries.forEach(e => {
@@ -505,10 +574,45 @@
   }
 
   function init() {
-    const saved = loadState();
+    // Read what's actually on disk right now -- this doubles as the
+    // baseline countVehicle()'s later conflict check compares against.
+    // A read failure here must NEVER be treated the same as "nothing
+    // stored yet": that would silently initialize a blank event and
+    // risk later writes overwriting whatever was actually there. So a
+    // thrown read stops initialization entirely -- no screen is shown,
+    // nothing is saved, nothing is assumed to be empty.
+    let initialRaw, saved;
+    try {
+      initialRaw = localStorage.getItem(STORAGE_KEY);
+      lastKnownStorageRaw = initialRaw;
+      saved = loadState();
+    } catch (e) {
+      showInitError('Could not read saved data from this device. To protect any existing check-ins, nothing has been loaded or changed. Please reload the app and try again.');
+      return;
+    }
     if (saved) appState = saved;
+
+    const hadValidEventId = !!(appState.eventInfo && isValidUuid(appState.eventInfo.id));
     migrateState();
-    saveState();
+    const justBackfilledEventId = appState.eventInfo && !hadValidEventId && isValidUuid(appState.eventInfo.id);
+
+    if (trySaveState(appState)) {
+      eventIdConfirmedPersisted = true;
+    } else if (justBackfilledEventId) {
+      // Non-blocking: the app still loads and works normally. The
+      // backfilled id exists in memory but isn't persisted yet, and
+      // countVehicle() will refuse to record a check-in under it until a
+      // retry there succeeds (or recording will be blocked with a clear
+      // error if storage is still unavailable).
+      eventIdConfirmedPersisted = false;
+      showInitError('Could not save this event’s ID to this device (storage may be full or unavailable). Check-ins will be enabled again once this device can save data.');
+    } else {
+      // This save attempt failed for some other reason (e.g. the
+      // material/referral defaults), but no new event id was involved --
+      // whatever id the event already had remains exactly what's already
+      // durable from an earlier session, so it's still confirmed.
+      eventIdConfirmedPersisted = true;
+    }
 
     populateReferralOptions();
     populateMaterialRows();
@@ -582,12 +686,45 @@
     if (!city) { alert('Please enter a city or location.'); return; }
 
     if (isEditingSetupOnly) {
-      appState.eventInfo = { date, city, partnerOrg };
-    } else {
-      // Fee/material and referral-source lists are kept across new events; only event info and entries reset.
-      appState = { eventInfo: { date, city, partnerOrg }, entries: [], materialTypes: appState.materialTypes, referralSources: appState.referralSources };
+      // Preserve the existing event's id (and any other existing fields) --
+      // only date/city/partnerOrg are meant to change here.
+      const updatedEventInfo = { ...appState.eventInfo, date, city, partnerOrg };
+      const proposedState = { ...appState, eventInfo: updatedEventInfo };
+      if (!trySaveState(proposedState)) {
+        alert('Could not save your changes to this device (storage may be full or unavailable). Please try again.');
+        return;
+      }
+      appState.eventInfo = updatedEventInfo;
+      eventIdConfirmedPersisted = true;
+      showAppScreen();
+      return;
     }
-    saveState();
+
+    // Starting a brand-new event: generate a fresh, stable id up front.
+    const newEventId = generateEventId();
+    if (!newEventId) {
+      alert('Could not generate a secure event ID in this browser. Please use a current browser and try again.');
+      return;
+    }
+
+    // Fee/material and referral-source lists are kept across new events; only event info and entries reset.
+    const proposedState = {
+      eventInfo: { id: newEventId, date, city, partnerOrg },
+      entries: [],
+      materialTypes: appState.materialTypes,
+      referralSources: appState.referralSources,
+    };
+
+    // Confirm the new event (and its id) is actually persisted before
+    // treating it as real -- never show success or move on with an id
+    // that only exists in memory.
+    if (!trySaveState(proposedState)) {
+      alert('Could not start the event -- this device could not save it (storage may be full or unavailable). Nothing was changed; please try again.');
+      return;
+    }
+
+    appState = proposedState;
+    eventIdConfirmedPersisted = true;
     showAppScreen();
   }
 
@@ -725,6 +862,35 @@
 
     clearCheckinError();
 
+    // Never record a check-in under an event id that hasn't actually been
+    // confirmed saved. If init()'s backfill (or anything else) never made
+    // it to disk, retry that specific save now, before touching anything
+    // else -- this recovers automatically the moment storage is writable
+    // again, with no reset or data loss needed.
+    if (appState.eventInfo && !eventIdConfirmedPersisted) {
+      // Verify storage hasn't been replaced or changed by something else
+      // since we last observed it, before overwriting it with our
+      // (possibly stale) in-memory copy. A failed read here must block
+      // recording (we can't safely verify there's no conflict), not be
+      // treated as "no conflict found".
+      let currentRaw;
+      try {
+        currentRaw = localStorage.getItem(STORAGE_KEY);
+      } catch (e) {
+        showCheckinError('Recording is temporarily unavailable — this device’s storage could not be checked (it may be unavailable). Please try again in a moment.');
+        return;
+      }
+      if (currentRaw !== lastKnownStorageRaw) {
+        showCheckinError('This event’s data has changed on this device since it was last loaded. Please reload the app before recording another check-in.');
+        return;
+      }
+      if (!trySaveState(appState)) {
+        showCheckinError('Recording is temporarily unavailable — this event could not be saved to this device (storage may be full or unavailable). Please try again in a moment.');
+        return;
+      }
+      eventIdConfirmedPersisted = true;
+    }
+
     const zip = document.getElementById('input-zip').value.trim();
     if (!zip) { highlightError('input-zip'); return; }
 
@@ -776,6 +942,18 @@
     }
 
     appState.entries = proposedEntries;
+    // trySaveCheckinEntries() has its own independent, unmodified write --
+    // refresh our conflict-detection baseline to match what it just
+    // persisted, without changing that function itself. The check-in
+    // already saved successfully above; a failed read here must never be
+    // reported as the check-in failing or as a reason to retry -- it only
+    // means this baseline may go briefly stale, which is harmless on its
+    // own (it would just be refreshed again on the next successful save).
+    try {
+      lastKnownStorageRaw = localStorage.getItem(STORAGE_KEY);
+    } catch (e) {
+      // Intentionally silent -- see note above.
+    }
 
     if (existingEntry) {
       editingEntryId = null;
@@ -1226,6 +1404,14 @@
       }
       if (data.eventInfo.partnerOrg !== undefined && typeof data.eventInfo.partnerOrg !== 'string') {
         return 'The event partner organization in this backup is not valid.';
+      }
+      // A missing/absent id is fine (older backups never had one -- it
+      // will be backfilled automatically after restore, same as loading
+      // old localStorage data). A PRESENT id that isn't a properly
+      // formatted UUID is rejected outright, since that suggests the file
+      // is actually corrupted rather than just predating this feature.
+      if (data.eventInfo.id !== undefined && data.eventInfo.id !== null && !isValidUuid(data.eventInfo.id)) {
+        return 'The event ID in this backup is not a valid UUID.';
       }
     }
 
