@@ -24,7 +24,7 @@
 // Milestone 9 Step 5 deploy). Bump this version string (...-v3, -v4, ...)
 // every time index.html, manifest.json, or either icon changes, even if
 // nothing in this file's own logic needs to change.
-const CACHE_NAME = 'charm-checkin-v2-shell-v3';
+const CACHE_NAME = 'charm-checkin-v2-shell-v4';
 const SHELL_FILES = [
   './',
   './index.html',
