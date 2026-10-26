@@ -273,7 +273,7 @@
         <button class="btn-icon-sm" onclick="openEditSetup()">Edit</button>
       </div>
       <div class="card" style="padding-top:12px;padding-bottom:12px;">
-        <span class="lbl">Vehicles checked in</span>
+        <span class="lbl">Check-ins recorded</span>
         <div class="vehicle-count-badge" id="vehicle-count-badge">0</div>
       </div>
 
@@ -285,7 +285,7 @@
       <!-- Check-in tab -->
       <div id="tab-checkin">
         <div class="edit-banner hidden" id="edit-banner">
-          <span>Editing a previous vehicle entry</span>
+          <span>Editing a previous check-in</span>
           <button class="btn-link" onclick="cancelEditEntry()">Cancel</button>
         </div>
 
@@ -313,7 +313,7 @@
             <input type="number" id="input-general-donation" min="0" step="0.01" inputmode="decimal" placeholder="0.00" onfocus="this.select()" oninput="updateSubtotal()">
           </div>
           <div class="subtotal-line">
-            <span>This vehicle</span>
+            <span>This check-in</span>
             <span id="vehicle-subtotal">$0.00</span>
           </div>
         </div>
@@ -334,7 +334,7 @@
           <div id="donation-breakdown"></div>
         </div>
         <div class="card">
-          <h2>Recent Vehicles</h2>
+          <h2>Recent Check-Ins</h2>
           <div id="recent-entries"><p class="muted">No entries yet.</p></div>
         </div>
         <div class="card">
@@ -387,7 +387,7 @@
 
           <button class="btn-danger" id="reset-open-btn" onclick="openResetPanel()">Reset Event (Testing Only)</button>
           <div class="reset-panel hidden" id="reset-panel">
-            <p>This permanently deletes all vehicle entries and event setup on this device. Your fee/material and referral source lists are kept. This cannot be undone. Type RESET below to confirm.</p>
+            <p>This permanently deletes all check-in entries and event setup on this device. Your fee/material and referral source lists are kept. This cannot be undone. Type RESET below to confirm.</p>
             <p class="muted">Tip: download a full backup before resetting -- this cannot be recovered otherwise.</p>
             <button class="btn-secondary" style="width:100%; margin-bottom:10px;" onclick="downloadJsonBackup()">Download Backup First</button>
             <input type="text" id="reset-confirm-input" placeholder="Type RESET" oninput="onResetInputChange()">
@@ -402,8 +402,8 @@
       <!-- Sticky action bar (check-in tab only) -->
       <div class="sticky-footer" id="sticky-footer">
         <p class="error hidden" id="checkin-error"></p>
-        <div class="subtotal">This vehicle: <strong id="sticky-subtotal">$0.00</strong></div>
-        <button class="btn-primary" id="count-btn" onclick="countVehicle()">Count Vehicle</button>
+        <div class="subtotal">This check-in: <strong id="sticky-subtotal">$0.00</strong></div>
+        <button class="btn-primary" id="count-btn" onclick="countVehicle()">Record Check-In</button>
       </div>
     </div>
 
@@ -685,7 +685,7 @@
   function cancelEditEntry() {
     editingEntryId = null;
     document.getElementById('edit-banner').classList.add('hidden');
-    document.getElementById('count-btn').textContent = 'Count Vehicle';
+    document.getElementById('count-btn').textContent = 'Record Check-In';
     resetCheckinForm();
   }
 
@@ -780,10 +780,10 @@
     if (existingEntry) {
       editingEntryId = null;
       document.getElementById('edit-banner').classList.add('hidden');
-      document.getElementById('count-btn').textContent = 'Count Vehicle';
-      showToast('Vehicle updated');
+      document.getElementById('count-btn').textContent = 'Record Check-In';
+      showToast('Check-in updated.');
     } else {
-      showToast('Vehicle #' + appState.entries.length + ' counted');
+      showToast('Check-in #' + appState.entries.length + ' recorded.');
     }
 
     resetCheckinForm();
@@ -916,13 +916,13 @@
     updateSubtotal();
 
     document.getElementById('edit-banner').classList.remove('hidden');
-    document.getElementById('count-btn').textContent = 'Update Vehicle';
+    document.getElementById('count-btn').textContent = 'Update Check-In';
     switchTab('checkin');
     window.scrollTo(0, 0);
   }
 
   function deleteEntry(id) {
-    if (!confirm('Delete this vehicle entry? This cannot be undone.')) return;
+    if (!confirm('Delete this check-in? This cannot be undone.')) return;
     appState.entries = appState.entries.filter(e => e.id !== id);
     if (editingEntryId === id) cancelEditEntry();
     saveState();
@@ -1059,7 +1059,7 @@
   }
 
   function exportCSV() {
-    if (!appState.entries.length) { alert('No vehicle entries yet — nothing to export.'); return; }
+    if (!appState.entries.length) { alert('No check-in entries yet — nothing to export.'); return; }
 
     const info = appState.eventInfo || {};
     const t = computeTotals();
@@ -1070,7 +1070,7 @@
     rows.push(['Event Date', formatEventDateLong(info.date)]);
     rows.push(['City / Location', info.city || '']);
     rows.push(['Partner Organization', info.partnerOrg || '']);
-    rows.push(['Total Vehicles', appState.entries.length]);
+    rows.push(['Total Check-Ins', appState.entries.length]);
     rows.push(['Total Donations/Fees Received', fmtUsdWhole(t.grandTotal)]);
     rows.push([]);
 
@@ -1078,7 +1078,7 @@
     rows.push(['ZIP Code Summary']);
     rows.push(['ZIP Code', 'Vehicle Count']);
     t.zipList.forEach(([zip, count]) => rows.push([csvZipCell(zip), count]));
-    rows.push(['Total Vehicles', appState.entries.length]);
+    rows.push(['Total Check-Ins', appState.entries.length]);
     rows.push([]);
 
     // --- 3. How Attendees Heard About the Event ---
@@ -1106,8 +1106,8 @@
     rows.push(['Total Donations/Fees Received', '', '', fmtUsdWhole(t.grandTotal)]);
     rows.push([]);
 
-    // --- 5. Detailed Vehicle Records ---
-    rows.push(['Detailed Vehicle Records']);
+    // --- 5. Detailed Check-In Records ---
+    rows.push(['Detailed Check-In Records']);
     const header = ['Timestamp', 'ZIP Code', 'How They Heard About the Event', 'Referral Detail'];
     appState.materialTypes.forEach(m => { header.push(m.label + ' Qty', m.label + ' Fee'); });
     header.push('General Donation', 'Total Money Received');
