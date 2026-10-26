@@ -224,14 +224,18 @@
   .reset-actions { display: flex; gap: 8px; }
 
   /* Manage materials */
-  .material-manage-row { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--gridline); flex-wrap: wrap; }
+  .material-manage-row { padding: 12px 0; border-bottom: 1px solid var(--gridline); }
   .material-manage-row:last-child { border-bottom: none; }
-  .material-manage-row input[type="text"] { flex: 1; min-width: 110px; }
-  .material-manage-row .price-input { display: flex; align-items: center; gap: 4px; width: 96px; }
-  .material-manage-row .price-input span { color: var(--text-secondary); font-size: 14px; }
-  .material-manage-row .price-input input { width: 100%; min-height: 44px; padding: 8px; }
-  .material-manage-row .active-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
-  .material-manage-row .active-toggle input { width: 18px; height: 18px; }
+  .material-manage-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .material-manage-top input[type="text"] { flex: 1; min-width: 110px; }
+  .material-manage-prices { display: flex; gap: 16px; flex-wrap: wrap; }
+  .price-field { display: flex; flex-direction: column; gap: 4px; }
+  .price-field-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+  .price-input { display: flex; align-items: center; gap: 4px; width: 110px; }
+  .price-input span { color: var(--text-secondary); font-size: 14px; }
+  .price-input input { width: 100%; min-height: 44px; padding: 8px; }
+  .active-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+  .active-toggle input { width: 18px; height: 18px; }
   .add-material-form { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--gridline); }
 </style>
 </head>
@@ -446,7 +450,7 @@
     { id: 'other-dont-know', label: "Other / Don't know", active: true },
   ];
 
-  let appState = { eventInfo: null, entries: [], materialTypes: [], referralSources: [] };
+  let appState = { eventInfo: null, entries: [], materialTypes: [], referralSources: [], eventMaterialPrices: {} };
   let editingEntryId = null;
   let isEditingSetupOnly = false;
   let lastCountAt = 0;
@@ -510,6 +514,47 @@
     return crypto.randomUUID();
   }
 
+  // Rounds to the nearest cent -- used only when recovering a historical
+  // per-unit rate from an old entry's frozen total fee (fee / qty), since
+  // that division can produce long binary-float tails.
+  function round2(n) {
+    return Math.round(n * 100) / 100;
+  }
+
+  // The price actually in effect for this event for a given material --
+  // the only value live computation (subtotal, check-in totals) may use.
+  // materialTypes[].defaultPrice is a reusable template and must never be
+  // read directly for computation; it only seeds eventMaterialPrices when
+  // a new event starts or a new material is added.
+  function getEventPrice(materialId) {
+    const p = appState.eventMaterialPrices && appState.eventMaterialPrices[materialId];
+    return (typeof p === 'number') ? p : 0;
+  }
+
+  // Builds a fresh event-price map seeded from each material's current
+  // default price. Used both to start a brand-new event and to backfill
+  // an in-progress event that predates per-event pricing.
+  function buildEventMaterialPrices(materialTypes) {
+    const prices = {};
+    materialTypes.forEach(m => { prices[m.id] = m.defaultPrice; });
+    return prices;
+  }
+
+  // Strictly validates a price as typed: a finite, non-negative number
+  // with at most two decimal places (e.g. "8", "8.5", "8.50"). Returns
+  // the parsed number, or null if the input doesn't meet this exactly --
+  // callers must reject an invalid value outright, never silently round,
+  // truncate, or otherwise "fix" it. Deliberately string-pattern-based
+  // (not just parseFloat + range checks) so it can't be fooled by
+  // scientific notation (e.g. "1e400", which parses to Infinity and
+  // would otherwise silently serialize to null via JSON.stringify).
+  function parseValidPrice(rawValue) {
+    const trimmed = String(rawValue).trim();
+    if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null;
+    const p = Number(trimmed);
+    return Number.isFinite(p) ? p : null;
+  }
+
   function showInitError(message) {
     const el = document.getElementById('init-error');
     if (!el) return;
@@ -552,6 +597,48 @@
     if (!appState.referralSources || !appState.referralSources.length) {
       appState.referralSources = DEFAULT_REFERRAL_SOURCES.map(s => ({ ...s }));
     }
+
+    // Event-specific material pricing (Milestone 9, Step 6B). `price` is
+    // renamed to `defaultPrice` -- a reusable template, not what's
+    // actually charged -- but the legacy `price` field is deliberately
+    // left in place (unused) rather than deleted, as a safety net.
+    appState.materialTypes.forEach(m => {
+      if (m.defaultPrice === undefined) {
+        m.defaultPrice = (typeof m.price === 'number') ? m.price : 0;
+      }
+    });
+    // Seed this event's actual prices from the catalog defaults wherever
+    // missing, so an in-progress event keeps charging exactly what it
+    // already was -- nothing changes mid-event just because this field
+    // didn't exist yet.
+    if (!appState.eventMaterialPrices) appState.eventMaterialPrices = {};
+    appState.materialTypes.forEach(m => {
+      if (appState.eventMaterialPrices[m.id] === undefined) {
+        appState.eventMaterialPrices[m.id] = m.defaultPrice;
+      }
+    });
+    // Backfill unitPriceCharged on existing entries' material lines, since
+    // older entries only ever stored the computed fee. For a quantity
+    // that was actually charged, the true historical rate is recovered
+    // from that fee itself (fee / qty) -- never from the catalog's
+    // current default, which may have changed since that entry was
+    // saved. A zero-quantity line never represented a real charge, so it
+    // gets null, not an invented price -- null maps cleanly onto a
+    // nullable price column for future synchronization and is never
+    // confused with a genuine $0 charge.
+    appState.entries.forEach(e => {
+      if (!e.materials) return;
+      Object.keys(e.materials).forEach(materialId => {
+        const line = e.materials[materialId];
+        if (!line || line.unitPriceCharged !== undefined) return;
+        if (line.qty > 0 && typeof line.fee === 'number') {
+          line.unitPriceCharged = round2(line.fee / line.qty);
+        } else {
+          line.unitPriceCharged = null;
+        }
+      });
+    });
+
     // Backfill a stable id for an existing event that doesn't have one yet,
     // or whose id isn't a validly-formatted UUID (e.g. an older backup).
     // Generated once -- every later launch loads this same id back in from
@@ -644,7 +731,7 @@
     }
     container.innerHTML = active.map(m => `
       <div class="qty-row">
-        <div class="qty-label">${escapeHtml(m.label)} <span class="muted">($${m.price} ea)</span></div>
+        <div class="qty-label">${escapeHtml(m.label)} <span class="muted">($${getEventPrice(m.id)} ea)</span></div>
         <div class="stepper">
           <button type="button" onclick="stepQty('${m.id}', -1)">&minus;</button>
           <input type="number" id="qty-${m.id}" min="0" value="0" inputmode="numeric" onfocus="this.select()" oninput="updateSubtotal()">
@@ -713,6 +800,7 @@
       entries: [],
       materialTypes: appState.materialTypes,
       referralSources: appState.referralSources,
+      eventMaterialPrices: buildEventMaterialPrices(appState.materialTypes),
     };
 
     // Confirm the new event (and its id) is actually persisted before
@@ -792,7 +880,7 @@
       const el = document.getElementById('qty-' + m.id);
       if (!el) return;
       const qty = Math.max(0, parseInt(el.value, 10) || 0);
-      const fee = qty * m.price;
+      const fee = qty * getEventPrice(m.id);
       const feeEl = document.getElementById('fee-' + m.id);
       if (feeEl) feeEl.textContent = fmtUsd(fee);
       total += fee;
@@ -909,7 +997,39 @@
     getActiveMaterials().forEach(m => {
       const el = document.getElementById('qty-' + m.id);
       const qty = Math.max(0, parseInt(el.value, 10) || 0);
-      materials[m.id] = { label: m.label, qty, fee: qty * m.price };
+      const existingLine = existingEntry ? existingEntry.materials[m.id] : null;
+
+      if (existingLine && existingLine.qty === qty) {
+        // Quantity is unchanged on this line (e.g. only the ZIP or
+        // referral source was corrected) -- preserve its stored fee and
+        // unitPriceCharged EXACTLY, with no recalculation at all. This
+        // matters even when unitPriceCharged is already known: a fee
+        // that didn't divide evenly by quantity (e.g. a $10 fee for 3
+        // items, unitPriceCharged recovered as 3.33) would otherwise
+        // drift to $9.99 on every unrelated edit if fee were
+        // recalculated as qty * unitPrice.
+        materials[m.id] = { label: m.label, qty, fee: existingLine.fee, unitPriceCharged: existingLine.unitPriceCharged };
+        return;
+      }
+
+      // Quantity is actually changing (or this is a new line). Use the
+      // existing historical unit price when one represents a real charge
+      // -- a historical charge is never silently repriced just because
+      // this event's current price later changed. A line with no prior
+      // record, or whose prior record was a zero-quantity placeholder
+      // (unitPriceCharged null -- no real charge ever occurred on it),
+      // is treated as a new charge and uses this event's current price
+      // instead. A quantity transitioning to zero never carries a real
+      // unit price going forward, regardless of source.
+      const unitPrice = (existingLine && existingLine.unitPriceCharged !== null && existingLine.unitPriceCharged !== undefined)
+        ? existingLine.unitPriceCharged
+        : getEventPrice(m.id);
+      materials[m.id] = {
+        label: m.label,
+        qty,
+        fee: qty * unitPrice,
+        unitPriceCharged: qty > 0 ? unitPrice : null,
+      };
     });
 
     const generalDonation = Math.max(0, parseFloat(document.getElementById('input-general-donation').value) || 0);
@@ -1116,15 +1236,29 @@
     if (!appState.materialTypes.length) { container.innerHTML = '<p class="muted">No materials yet.</p>'; return; }
     container.innerHTML = appState.materialTypes.map(m => `
       <div class="material-manage-row">
-        <input type="text" value="${escapeHtml(m.label)}" onchange="updateMaterialField('${m.id}','label', this.value)">
-        <div class="price-input">
-          <span>$</span>
-          <input type="number" min="0" step="0.01" value="${m.price}" onchange="updateMaterialField('${m.id}','price', this.value)">
+        <div class="material-manage-top">
+          <input type="text" value="${escapeHtml(m.label)}" onchange="updateMaterialField('${m.id}','label', this.value)">
+          <label class="active-toggle">
+            <input type="checkbox" ${m.active ? 'checked' : ''} onchange="updateMaterialField('${m.id}','active', this.checked)">
+            Active
+          </label>
         </div>
-        <label class="active-toggle">
-          <input type="checkbox" ${m.active ? 'checked' : ''} onchange="updateMaterialField('${m.id}','active', this.checked)">
-          Active
-        </label>
+        <div class="material-manage-prices">
+          <div class="price-field">
+            <span class="price-field-label">Default Price</span>
+            <div class="price-input">
+              <span>$</span>
+              <input type="number" min="0" step="0.01" value="${m.defaultPrice}" onchange="updateMaterialField('${m.id}','defaultPrice', this.value)">
+            </div>
+          </div>
+          <div class="price-field">
+            <span class="price-field-label">This Event's Price</span>
+            <div class="price-input">
+              <span>$</span>
+              <input type="number" min="0" step="0.01" value="${getEventPrice(m.id)}" onchange="updateMaterialField('${m.id}','eventPrice', this.value)">
+            </div>
+          </div>
+        </div>
       </div>
     `).join('');
   }
@@ -1137,9 +1271,12 @@
       const trimmed = String(value).trim();
       if (!trimmed) { renderMaterialsManageList(); return; }
       m.label = trimmed;
-    } else if (field === 'price') {
-      const p = parseFloat(value);
-      if (!isNaN(p) && p >= 0) m.price = p;
+    } else if (field === 'defaultPrice' || field === 'eventPrice') {
+      // Pricing edits are hardened separately -- see updateMaterialPrice()
+      // -- so a failed save can never leave the displayed or live price
+      // different from what's actually persisted.
+      updateMaterialPrice(id, field, value);
+      return;
     } else if (field === 'active') {
       m.active = !!value;
     }
@@ -1151,19 +1288,72 @@
     renderTotals();
   }
 
+  // Hardened edit for a material's Default Price or This Event's Price.
+  // Validates strictly, then builds a proposed state and confirms it's
+  // actually persisted before ever committing to it -- the same
+  // build-then-confirm pattern saveSetup() uses for a new event. This
+  // guarantees two things a plain mutate-then-saveState() can't:
+  //   1. An unsaved price can never affect a subsequent check-in's
+  //      calculation, since getEventPrice()/populateMaterialRows()/
+  //      updateSubtotal() all read the live appState, and that is only
+  //      ever reassigned once the write is confirmed to have succeeded.
+  //   2. A failed save can't leave the displayed price different from
+  //      what's actually on disk -- on failure, appState is untouched,
+  //      so re-rendering the manage list shows exactly the still-saved
+  //      value, not the rejected one.
+  function updateMaterialPrice(id, field, rawValue) {
+    const p = parseValidPrice(rawValue);
+    if (p === null) {
+      alert('Enter a price of 0 or more, with at most two decimal places.');
+      renderMaterialsManageList();
+      return;
+    }
+
+    const proposedState = (field === 'defaultPrice')
+      ? { ...appState, materialTypes: appState.materialTypes.map(mt => (mt.id === id ? { ...mt, defaultPrice: p } : mt)) }
+      : { ...appState, eventMaterialPrices: { ...appState.eventMaterialPrices, [id]: p } };
+
+    if (!trySaveState(proposedState)) {
+      alert('Could not save this price to this device (storage may be full or unavailable). The previous price has been kept.');
+      renderMaterialsManageList();
+      return;
+    }
+
+    appState = proposedState;
+    populateMaterialRows();
+    updateSubtotal();
+    renderMaterialsManageList();
+    renderTotals();
+  }
+
   function addMaterialType() {
     const nameInput = document.getElementById('new-material-name');
     const priceInput = document.getElementById('new-material-price');
     const label = nameInput.value.trim();
-    const price = parseFloat(priceInput.value);
     if (!label) { alert('Enter a name for the material.'); return; }
-    if (isNaN(price) || price < 0) { alert('Enter a valid price (0 or more).'); return; }
+    const price = parseValidPrice(priceInput.value);
+    if (price === null) { alert('Enter a price of 0 or more, with at most two decimal places.'); return; }
 
-    appState.materialTypes.push({
-      id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
-      label, price, active: true,
-    });
-    saveState();
+    // A brand-new material has no history yet, so its event price starts
+    // out equal to its default -- seeded immediately so it's never
+    // missing from eventMaterialPrices (which would otherwise read as $0
+    // via getEventPrice()'s safe fallback). Built as a proposed state and
+    // confirmed persisted before committing, same as updateMaterialPrice()
+    // -- a failed save must add nothing at all, not a material whose
+    // price only exists in memory.
+    const newId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+    const proposedState = {
+      ...appState,
+      materialTypes: [...appState.materialTypes, { id: newId, label, defaultPrice: price, active: true }],
+      eventMaterialPrices: { ...appState.eventMaterialPrices, [newId]: price },
+    };
+
+    if (!trySaveState(proposedState)) {
+      alert('Could not save this new material to this device (storage may be full or unavailable). Nothing was added; please try again.');
+      return;
+    }
+
+    appState = proposedState;
     nameInput.value = '';
     priceInput.value = '';
     populateMaterialRows();
@@ -1273,12 +1463,16 @@
 
     // --- 4. Donations and Material Fees ---
     rows.push(['Donations and Material Fees']);
-    rows.push(['Material', 'Quantity', 'Fee per Item', 'Total Amount']);
+    rows.push(['Material', 'Quantity', 'Current Event Unit Price', 'Total Amount']);
     appState.materialTypes.forEach(m => {
       const d = t.materialTotals[m.id];
       if (!d.qty) return; // only materials actually used during the event
       const label = d.label + (d.active ? '' : ' (inactive)');
-      rows.push([label, d.qty, fmtUsdWhole(m.price), fmtUsdWhole(d.fee)]);
+      // The "Current Event Unit Price" column is a reference value (this
+      // event's price as of export time) -- it never recalculates or
+      // replaces d.fee, which is the sum of each entry's own historically
+      // recorded fee and is never touched by a later price change.
+      rows.push([label, d.qty, fmtUsdWhole(getEventPrice(m.id)), fmtUsdWhole(d.fee)]);
     });
     rows.push(['General URA Donations', '', '', fmtUsdWhole(t.generalTotal)]);
     rows.push(['Total Donations/Fees Received', '', '', fmtUsdWhole(t.grandTotal)]);
@@ -1336,8 +1530,8 @@
     document.getElementById('reset-confirm-btn').disabled = val !== 'RESET';
   }
   function doResetEvent() {
-    // Fee/material and referral-source lists are intentionally preserved across a reset — only event info and entries clear.
-    appState = { eventInfo: null, entries: [], materialTypes: appState.materialTypes, referralSources: appState.referralSources };
+    // Fee/material and referral-source lists are intentionally preserved across a reset — only event info, entries, and this event's prices clear.
+    appState = { eventInfo: null, entries: [], materialTypes: appState.materialTypes, referralSources: appState.referralSources, eventMaterialPrices: {} };
     saveState();
     editingEntryId = null;
     closeResetPanel();
@@ -1441,6 +1635,13 @@
           if (md.fee !== undefined && typeof md.fee !== 'number') {
             return `Check-in #${i + 1} has an invalid fee for material "${key}".`;
           }
+          // unitPriceCharged is optional (older backups won't have it) and,
+          // when present, is either a real historical rate or explicitly
+          // null (a zero-quantity line that was never actually charged) --
+          // never anything else.
+          if (md.unitPriceCharged !== undefined && md.unitPriceCharged !== null && typeof md.unitPriceCharged !== 'number') {
+            return `Check-in #${i + 1} has an invalid unit price for material "${key}".`;
+          }
         }
       }
       if (e.generalDonation !== undefined && e.generalDonation !== null && typeof e.generalDonation !== 'number') {
@@ -1458,7 +1659,23 @@
       if (typeof m.id !== 'string' || !m.id) return `Fee material #${i + 1} is missing a valid id.`;
       if (typeof m.label !== 'string' || !m.label) return `Fee material #${i + 1} is missing a label.`;
       if (typeof m.active !== 'boolean') return `Fee material #${i + 1} is missing a valid active flag.`;
+      // Either the legacy `price` or the newer `defaultPrice` (or both,
+      // or neither -- migrateState() backfills whichever is missing) is
+      // accepted; only an actually-present value of the wrong type is rejected.
       if (m.price !== undefined && typeof m.price !== 'number') return `Fee material #${i + 1} has an invalid price.`;
+      if (m.defaultPrice !== undefined && typeof m.defaultPrice !== 'number') return `Fee material #${i + 1} has an invalid default price.`;
+    }
+
+    // eventMaterialPrices is optional (older backups predate per-event
+    // pricing -- migrateState() seeds it from defaults after restore).
+    // When present, every value must be a real number.
+    if (data.eventMaterialPrices !== undefined && data.eventMaterialPrices !== null) {
+      if (!isPlainObject(data.eventMaterialPrices)) return 'This backup’s event pricing is not valid.';
+      for (const key of Object.keys(data.eventMaterialPrices)) {
+        if (typeof data.eventMaterialPrices[key] !== 'number') {
+          return `This backup has an invalid event price for material "${key}".`;
+        }
+      }
     }
 
     if (!Array.isArray(data.referralSources)) return 'This backup is missing its referral sources list.';
