@@ -252,6 +252,12 @@
   .payment-amount-row .price-input { width: 120px; }
   .discrepancy-reason-group { display: flex; gap: 8px; flex-wrap: wrap; }
   .discrepancy-btn.active { background: var(--critical); color: #fff; border-color: var(--critical); }
+  .no-payment-btn {
+    display: block; width: 100%; margin-top: 8px;
+    background: var(--page-plane); border: 1px dashed var(--border); color: var(--text-secondary);
+    font-size: 13.5px; font-weight: 600; padding: 10px; min-height: 40px;
+  }
+  .no-payment-btn.active { background: var(--critical); color: #fff; border-color: var(--critical); border-style: solid; }
 </style>
 </head>
 <body>
@@ -1053,6 +1059,9 @@
             <button type="button" class="payment-method-btn${row.methodId === pm.id ? ' active' : ''}" onclick="selectPaymentMethod(${i}, '${pm.id}')">${escapeHtml(pm.label)}</button>
           `).join('')}
         </div>
+        ${(!splitMode && i === 0) ? `
+          <button type="button" class="no-payment-btn${row.noPaymentCollected ? ' active' : ''}" onclick="markNoPaymentCollected()">No Payment Collected</button>
+        ` : ''}
         ${splitMode ? `
           <div class="payment-amount-row">
             <div class="price-input">
@@ -1101,6 +1110,33 @@
 
   function selectPaymentMethod(i, methodId) {
     paymentFormRows[i].methodId = methodId;
+    // Picking a real method always supersedes an earlier explicit "No
+    // Payment Collected" declaration on this row.
+    paymentFormRows[i].noPaymentCollected = false;
+    renderPaymentRows();
+  }
+
+  // Explicit "No Payment Collected" declaration (single-method mode
+  // only). Functionally this already matches what an untouched row
+  // produces (collected = $0, the existing discrepancy reason picker
+  // appears) -- this button exists purely so that outcome is a direct,
+  // visible, intentional choice rather than something a volunteer has
+  // to discover by NOT tapping anything. No change to the underlying
+  // save/validation/reporting logic was needed for this.
+  function markNoPaymentCollected() {
+    const row = paymentFormRows[0];
+    if (editingEntryId && row.methodId) {
+      // Editing an entry that currently has a real recorded payment --
+      // confirm before clearing it, since this is a destructive action
+      // on an existing record, not just toggling an in-progress choice.
+      const label = getPaymentMethodLabel(row.methodId);
+      const amount = fmtUsd(computeCheckinDue());
+      if (!confirm('This check-in has ' + amount + ' recorded as collected via ' + label + '. Confirming will change the collected amount to $0.00 and record this as a correction. Continue?')) {
+        return;
+      }
+    }
+    row.methodId = null;
+    row.noPaymentCollected = true;
     renderPaymentRows();
   }
 
@@ -1618,7 +1654,13 @@
         paymentFormRows[0].amount = null;
       }
     } else {
-      paymentFormRows = [{ methodId: null, amount: null }];
+      // No payments recorded. If this entry is actually tracked (as
+      // opposed to predating payment tracking entirely), that genuinely
+      // means "no payment collected" was recorded -- reflect that back
+      // as the explicit, visibly-selected choice rather than looking
+      // like nothing has been decided yet. An untracked (unknown)
+      // entry gets no such implication.
+      paymentFormRows = [{ methodId: null, amount: null, noPaymentCollected: !!effective.tracked }];
     }
     discrepancyReason = effective.discrepancy ? effective.discrepancy.reasonType : null;
     document.getElementById('discrepancy-note').value = effective.discrepancy ? (effective.discrepancy.note || '') : '';
