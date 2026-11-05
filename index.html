@@ -10,6 +10,13 @@
 <meta name="apple-mobile-web-app-title" content="CHaRM Check-In">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="icon-192.png">
+<!-- STAGING-only Supabase client + config (Step 238). Loaded early so
+     it is available as soon as possible; both files degrade gracefully
+     (see supabase-config.js) if offline on first launch. Neither this
+     library nor supabase-config.js touches the app's own localStorage
+     data -- see that file's own header comment. -->
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script defer src="supabase-config.js"></script>
 <style>
   .viz-root {
     color-scheme: light;
@@ -265,6 +272,41 @@
   <div class="toast" id="toast"></div>
 
   <div class="wrap">
+
+    <!-- STAGING connection status (Step 238) -- informational only.
+         Signing in or out here has NO effect on check-in recording,
+         which works identically whether this shows connected or not.
+         Synchronization of check-in data is not implemented yet. -->
+    <div class="card" id="staging-status-bar" style="padding:10px 14px; margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
+      <span id="staging-status-text" class="muted" style="font-size:13px;">○ Offline (not connected to STAGING)</span>
+      <button class="btn-link" id="staging-status-toggle" onclick="toggleStagingPanel()" style="font-size:13px;">Connect</button>
+    </div>
+    <div class="card hidden" id="staging-login-panel">
+      <h2>STAGING Connection (optional)</h2>
+      <p class="muted" style="margin-bottom:12px;">
+        This does not sync check-ins yet -- it only confirms sign-in works.
+        Check-in recording is unaffected either way.
+      </p>
+      <div id="staging-signed-out-fields">
+        <div class="field">
+          <label for="staging-email">Staff email</label>
+          <input type="text" id="staging-email" autocomplete="username">
+        </div>
+        <div class="field">
+          <label for="staging-password">Password</label>
+          <input type="password" id="staging-password" autocomplete="current-password">
+        </div>
+        <button class="btn-primary" id="staging-signin-btn" onclick="handleStagingSignIn()">Sign In</button>
+      </div>
+      <div class="hidden" id="staging-signed-in-fields">
+        <p id="staging-signed-in-email" style="margin-bottom:12px;"></p>
+        <button class="btn-secondary" onclick="handleStagingSignOut()">Sign Out</button>
+      </div>
+      <p class="error hidden" id="staging-error"></p>
+      <div style="text-align:center; margin-top:10px;">
+        <button class="btn-link" onclick="toggleStagingPanel()">Close</button>
+      </div>
+    </div>
 
     <!-- Always reachable regardless of which screen (if any) is shown --
          a catastrophic load failure must still be visible even when
@@ -2388,8 +2430,110 @@
     el.classList.remove('hidden');
   }
 
+  // ---- STAGING connection status (Step 238) --------------------------
+  // Purely informational/optional. Everything here reads from and
+  // writes to window.CharmStaging only (supabase-config.js) -- never
+  // appState, never charmCheckinDataV2. See that file's header comment
+  // for why that separation is deliberate: a sign-in failure or an
+  // unrefreshable session can never erase or overwrite a local check-in.
+  function renderStagingStatus(status) {
+    const textEl = document.getElementById('staging-status-text');
+    const toggleEl = document.getElementById('staging-status-toggle');
+    const signedOutEl = document.getElementById('staging-signed-out-fields');
+    const signedInEl = document.getElementById('staging-signed-in-fields');
+    const emailEl = document.getElementById('staging-signed-in-email');
+    if (!textEl) return;
+
+    if (status.state === 'checking') {
+      textEl.textContent = '⏳ Checking STAGING connection…';
+    } else if (status.state === 'connected') {
+      textEl.textContent = '● Connected to STAGING (' + status.email + ')';
+      if (toggleEl) toggleEl.textContent = 'Manage';
+    } else if (status.state === 'error') {
+      textEl.textContent = '⚠ STAGING connection error' + (status.error ? ' — ' + status.error : '');
+      if (toggleEl) toggleEl.textContent = 'Connect';
+    } else {
+      textEl.textContent = '○ Offline (not connected to STAGING)';
+      if (toggleEl) toggleEl.textContent = 'Connect';
+    }
+
+    if (signedOutEl && signedInEl) {
+      const signedIn = status.state === 'connected';
+      signedOutEl.classList.toggle('hidden', signedIn);
+      signedInEl.classList.toggle('hidden', !signedIn);
+      if (signedIn && emailEl) emailEl.textContent = 'Signed in to STAGING as ' + status.email;
+    }
+  }
+
+  function toggleStagingPanel() {
+    document.getElementById('staging-login-panel').classList.toggle('hidden');
+    const errEl = document.getElementById('staging-error');
+    if (errEl) errEl.classList.add('hidden');
+  }
+
+  // Guards against window.CharmStaging being unavailable (the CDN
+  // library and/or supabase-config.js failed to load -- realistically,
+  // a fully offline first-ever launch). Returns true and shows a clear,
+  // visible error in #staging-error if so, WITHOUT ever touching
+  // appState or charmCheckinDataV2 and WITHOUT letting an unhandled
+  // promise rejection reach the console (Step 239/240).
+  function stagingUnavailable() {
+    const errEl = document.getElementById('staging-error');
+    if (window.CharmStaging) return false;
+    if (errEl) {
+      errEl.textContent = 'STAGING connection is not available right now (the connection library may not have loaded). Check-in recording is unaffected.';
+      errEl.classList.remove('hidden');
+    }
+    return true;
+  }
+
+  async function handleStagingSignIn() {
+    if (stagingUnavailable()) return;
+    const email = document.getElementById('staging-email').value.trim();
+    const password = document.getElementById('staging-password').value;
+    const errEl = document.getElementById('staging-error');
+    errEl.classList.add('hidden');
+    if (!email || !password) {
+      errEl.textContent = 'Enter both email and password.';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    const result = await window.CharmStaging.signIn(email, password);
+    document.getElementById('staging-password').value = '';
+    if (!result.ok) {
+      errEl.textContent = result.error || 'Sign-in failed.';
+      errEl.classList.remove('hidden');
+    }
+  }
+
+  async function handleStagingSignOut() {
+    if (stagingUnavailable()) return;
+    await window.CharmStaging.signOut();
+  }
+
   init();
   registerServiceWorker();
+
+  // The two external scripts in <head> are now `defer`red (Step 240),
+  // so they execute in document order (CDN library, then
+  // supabase-config.js) but only AFTER this entire document has been
+  // parsed -- which is AFTER this inline script would otherwise have
+  // run synchronously at this point. Checking window.CharmStaging here
+  // directly would therefore almost always see it as not yet defined,
+  // even on a full, fast, successful load -- not just the offline case
+  // this check was originally meant to detect. Deferred scripts are
+  // guaranteed to finish before DOMContentLoaded fires, so this hook
+  // is deferred to that event instead -- by then, window.CharmStaging
+  // reliably reflects whether those two scripts actually loaded,
+  // online or offline. init() and registerServiceWorker() above are
+  // unaffected and deliberately left exactly where they are -- neither
+  // depends on the deferred scripts at all.
+  document.addEventListener('DOMContentLoaded', function () {
+    if (window.CharmStaging) {
+      window.CharmStaging.onStatusChange(renderStagingStatus);
+      window.CharmStaging.checkExistingSession();
+    }
+  });
 </script>
 </body>
 </html>

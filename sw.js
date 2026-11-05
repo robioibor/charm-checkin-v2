@@ -24,18 +24,41 @@
 // Milestone 9 Step 5 deploy). Bump this version string (...-v3, -v4, ...)
 // every time index.html, manifest.json, or either icon changes, even if
 // nothing in this file's own logic needs to change.
-const CACHE_NAME = 'charm-checkin-v2-shell-v7';
+//
+// Step 238: added supabase-config.js (same-origin, so it belongs with
+// the rest of the required shell) and the Supabase JS library (a
+// cross-origin CDN URL, kept in a SEPARATE best-effort cache call
+// below -- see the install handler's own comment for why it must
+// never be mixed into SHELL_FILES).
+const CACHE_NAME = 'charm-checkin-v2-shell-v8';
 const SHELL_FILES = [
   './',
   './index.html',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
+  './supabase-config.js',
+];
+// Best-effort only -- NOT required for the app shell to work offline.
+// cache.addAll() is all-or-nothing: if this cross-origin CDN file were
+// included in SHELL_FILES above and it failed to fetch (CDN hiccup,
+// installing while offline), the ENTIRE shell install would fail,
+// including index.html itself -- exactly the "always launchable
+// offline" guarantee this file exists to protect. Kept separate so a
+// failure here can never take down the core shell.
+const OPTIONAL_FILES = [
+  'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js',
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_FILES))
+    caches.open(CACHE_NAME).then((cache) =>
+      cache.addAll(SHELL_FILES).then(() =>
+        cache.addAll(OPTIONAL_FILES).catch(() => {
+          // Swallowed deliberately -- see OPTIONAL_FILES comment above.
+        })
+      )
+    )
   );
 });
 
