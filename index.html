@@ -341,6 +341,7 @@
         <div>
           <h1 id="header-city">—</h1>
           <p class="muted" id="header-date-partner">—</p>
+          <p class="muted" id="header-sync-status" style="font-size:0.85em;"></p>
         </div>
         <button class="btn-icon-sm" onclick="openEditSetup()">Edit</button>
       </div>
@@ -440,6 +441,11 @@
         <div class="card">
           <h2>Payment Reconciliation</h2>
           <div id="payment-breakdown"></div>
+        </div>
+        <div class="card">
+          <h2>STAGING Synchronization</h2>
+          <div id="checkin-sync-summary"></div>
+          <button type="button" class="btn-secondary" id="checkin-retry-now-btn" onclick="handleCheckInRetryNow()" style="margin-top:10px;">Retry Now</button>
         </div>
         <div class="card">
           <h2>Recent Check-Ins</h2>
@@ -616,6 +622,49 @@
     } catch (e) {
       return false;
     }
+  }
+
+  // Synchronization metadata (Step 267, Phase A only -- no network code
+  // yet). Purely additive bookkeeping, stored alongside an entry or a
+  // catalog item -- never read by anything else in this file yet, and
+  // never a substitute for any existing field. Every new entry,
+  // material, or referral source gets this shape at creation time;
+  // migrateState() backfills it onto anything that predates this
+  // feature, defaulting to 'pending' either way. A later phase (not
+  // this one) will add the code that actually transitions these
+  // values -- 'syncing'/'synced'/'failed'/'conflict'/'edited_after_sync'
+  // are reserved states this field can hold, but nothing in Phase A
+  // ever sets anything other than 'pending'.
+  // attemptId (Step 275): a fresh token generated each time a sync
+  // attempt actually starts (moves to 'syncing'), so the response
+  // handler can tell "the response for THIS specific request" apart
+  // from any other request for the same record -- including an older
+  // request whose sent values happen to coincide with the current ones
+  // again (e.g. an edit that's reverted), which content-only comparison
+  // cannot distinguish (Step 274). null whenever nothing is in flight.
+  // uncertain (Step 290): true means a request for this record may
+  // already have reached STAGING, but no definitive response was ever
+  // received for it (a transport failure, or an app restart that
+  // interrupted a request mid-flight) -- as opposed to a record that
+  // was simply never dispatched, or one whose failure is DEFINITELY
+  // known to be safe (a clean server-side rejection that rolled back,
+  // or a local validation failure that never reached the network).
+  // Only meaningfully consulted today by the check-in edit flow (an
+  // edit to a record with uncertain:true is routed to 'needs_review'
+  // rather than silently regenerating payment ids on a bundle that may
+  // already be partly landed) -- see that flow's own comment for why
+  // this matters specifically for check-ins. Harmless, unused metadata
+  // for events/materials/referral sources, which have no equivalent
+  // risk (their own sync functions have no child rows with ids that
+  // regenerate on edit, so an edit-then-retry there is always safe
+  // regardless of this flag -- Steps 273/275's attemptId+snapshot
+  // guards remain their actual protection).
+  function defaultSyncMeta() {
+    return { status: 'pending', lastAttemptAt: null, lastError: null, conflictDetails: null, attemptId: null, uncertain: false };
+  }
+
+  function generateAttemptId() {
+    return crypto.randomUUID ? crypto.randomUUID() : ('attempt-' + Date.now() + '-' + Math.random());
   }
 
   // Whether a value is a properly formatted UUID (any RFC 4122 variant,
@@ -818,12 +867,702 @@
       if (!e.referralSourceId && e.referralSource) {
         let match = appState.referralSources.find(s => s.label.trim().toLowerCase() === String(e.referralSource).trim().toLowerCase());
         if (!match) {
-          match = { id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()), label: e.referralSource, active: true };
+          match = { id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()), label: e.referralSource, active: true, _sync: defaultSyncMeta() };
           appState.referralSources.push(match);
         }
         e.referralSourceId = match.id;
       }
     });
+
+    // Synchronization metadata backfill (Step 267, Phase A). Deliberately
+    // last in this function, after every block above -- including the
+    // one immediately above, which can itself create a brand-new
+    // referral source -- so this pass sees the final state of each
+    // array for this run and never misses anything another backfill
+    // step just added. Purely additive: only ever adds the _sync field
+    // itself when entirely absent, never touches any other field on
+    // the entry/material/referral source it's attached to.
+    appState.entries.forEach(e => {
+      if (!e._sync) e._sync = defaultSyncMeta();
+    });
+    appState.materialTypes.forEach(m => {
+      if (!m._sync) m._sync = defaultSyncMeta();
+    });
+    appState.referralSources.forEach(s => {
+      if (!s._sync) s._sync = defaultSyncMeta();
+    });
+    if (appState.eventInfo && !appState.eventInfo._sync) {
+      appState.eventInfo._sync = defaultSyncMeta();
+    }
+
+    // attemptId backfill (Step 275). An item whose _sync predates this
+    // field (added in an earlier app version, or by the block just
+    // above using an OLDER cached defaultSyncMeta() shape in some
+    // future refactor) otherwise wouldn't have this key at all --
+    // purely additive, same spirit as the _sync backfill above.
+    appState.entries.forEach(e => {
+      if (e._sync && !('attemptId' in e._sync)) e._sync = { ...e._sync, attemptId: null };
+    });
+    appState.materialTypes.forEach(m => {
+      if (m._sync && !('attemptId' in m._sync)) m._sync = { ...m._sync, attemptId: null };
+    });
+    appState.referralSources.forEach(s => {
+      if (s._sync && !('attemptId' in s._sync)) s._sync = { ...s._sync, attemptId: null };
+    });
+    if (appState.eventInfo && appState.eventInfo._sync && !('attemptId' in appState.eventInfo._sync)) {
+      appState.eventInfo._sync = { ...appState.eventInfo._sync, attemptId: null };
+    }
+
+    // uncertain backfill (Step 290) -- same purely additive pattern as
+    // the attemptId backfill just above.
+    appState.entries.forEach(e => {
+      if (e._sync && !('uncertain' in e._sync)) e._sync = { ...e._sync, uncertain: false };
+    });
+    appState.materialTypes.forEach(m => {
+      if (m._sync && !('uncertain' in m._sync)) m._sync = { ...m._sync, uncertain: false };
+    });
+    appState.referralSources.forEach(s => {
+      if (s._sync && !('uncertain' in s._sync)) s._sync = { ...s._sync, uncertain: false };
+    });
+    if (appState.eventInfo && appState.eventInfo._sync && !('uncertain' in appState.eventInfo._sync)) {
+      appState.eventInfo._sync = { ...appState.eventInfo._sync, uncertain: false };
+    }
+
+    // Restart recovery (Step 272, Phase B; attemptId cleared per Step
+    // 275; extended to check-ins per Step 285, item 12). A 'syncing'
+    // status can only ever mean "a request was sent and we never found
+    // out what happened to it" -- the app may have been closed or
+    // crashed before the response came back. There's no way to tell,
+    // from local data alone, whether that request actually landed at
+    // STAGING or not. Left as 'syncing' forever, the item would never
+    // be retried again. Reset back to 'pending' here -- sync_event/
+    // sync_fee_material/sync_referral_source/sync_check_in are all
+    // idempotent inserts keyed by stable id, so retrying one that
+    // actually did land the first time just comes back as a harmless
+    // 'noop', never a duplicate. The dead attempt's attemptId is
+    // cleared at the same time -- it can never be matched by any
+    // future response (that request is gone for good), so leaving it
+    // in place would only be misleading, never useful.
+    //
+    // Resetting a check-in stranded in 'syncing' back to 'pending' here
+    // is NOT automatic catch-up -- it only ever applies to a request
+    // that was already actually sent and whose outcome is genuinely
+    // unknown; it never attempts, retries, or even looks at any check-in
+    // that is simply 'pending' or 'failed' already. This function never
+    // calls attemptCheckInSync() or sends anything over the network --
+    // the next real attempt (if any) only ever happens via the single
+    // creation-time trigger (Step 285, item 9) or, in a later phase,
+    // Phase D's explicit catch-up sweep.
+    if (appState.eventInfo && appState.eventInfo._sync && appState.eventInfo._sync.status === 'syncing') {
+      appState.eventInfo._sync = { ...appState.eventInfo._sync, status: 'pending', attemptId: null };
+    }
+    appState.materialTypes.forEach(m => {
+      if (m._sync && m._sync.status === 'syncing') m._sync = { ...m._sync, status: 'pending', attemptId: null };
+    });
+    appState.referralSources.forEach(s => {
+      if (s._sync && s._sync.status === 'syncing') s._sync = { ...s._sync, status: 'pending', attemptId: null };
+    });
+    appState.entries.forEach(e => {
+      // Step 290, item 4: a check-in's request may already have
+      // reached STAGING before the app closed -- unlike the three
+      // resets above, this one also sets uncertain:true, so this is
+      // distinguishable from a check-in that was genuinely never
+      // attempted (which keeps uncertain:false). The check-in edit
+      // flow consults this to route an edit to 'needs_review' instead
+      // of silently regenerating payment ids on a possibly-already-
+      // landed bundle.
+      if (e._sync && e._sync.status === 'syncing') e._sync = { ...e._sync, status: 'pending', attemptId: null, uncertain: true };
+    });
+  }
+
+  /* ---------- Synchronization: event + catalog (Step 272, Phase B) ----------
+   *
+   * Syncs event info, fee materials, and referral sources to STAGING via
+   * the existing sync_event / sync_fee_material / sync_referral_source
+   * RPCs (argument names and response shapes verified directly against
+   * sql/009_add_event_fields_and_sync_functions.sql -- not guessed).
+   * Entries/payments are explicitly out of scope here; that is Phase C.
+   *
+   * Every attempt function here runs strictly AFTER the local save that
+   * triggered it has already succeeded -- a sync failure only ever
+   * updates that one item's own _sync metadata, never undoes or retries
+   * the local save itself, and never blocks the UI (every call is
+   * fire-and-forget; nothing here is awaited by a caller).
+   *
+   * "Success" means the RPC's own jsonb body said so (status 'inserted'
+   * or 'noop') -- an HTTP response that didn't error but also doesn't
+   * contain one of the documented shapes is treated as a failure, never
+   * a silent synced.
+   */
+
+  function eventDisplayName(info) {
+    return info.date ? (info.city + ' — ' + info.date) : info.city;
+  }
+
+  // Structural check only (matches exactly what the <input type="date">
+  // field can actually produce) -- not a full calendar validation, just
+  // enough to guarantee sync_event is never called with a blank/invalid
+  // p_date, since events.date is NOT NULL in STAGING (Step 273, item 5).
+  function isValidEventForSync(info) {
+    return !!(info && typeof info.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(info.date));
+  }
+
+  function canAttemptSync(sync) {
+    return !!(window.CharmStaging) &&
+      window.CharmStaging.getStatus().state === 'connected' &&
+      !!sync && (sync.status === 'pending' || sync.status === 'failed');
+  }
+
+  // Pure -- computes the NEW _sync value a response implies, without
+  // mutating anything. Every caller below persists this via the same
+  // build-a-proposed-state-then-trySaveState pattern used elsewhere in
+  // this file (saveSetup, updateMaterialPrice, addMaterialType), so a
+  // failed localStorage write during a sync status update can never
+  // leave a misleading status persisted OR displayed (Step 273, item 1):
+  // on failure, appState is simply never reassigned, so the previous,
+  // still-accurate, still-persisted status is exactly what stays live
+  // and exactly what re-renders.
+  // attemptId is always null in a computed outcome -- once a request has
+  // resolved (success, conflict, or failure), nothing is in flight for
+  // this record anymore (Step 275).
+  //
+  // uncertain (Step 290) distinguishes a DEFINITIVE outcome from an
+  // AMBIGUOUS one:
+  //   - result.ok with a recognized body (inserted/noop/conflict): the
+  //     server actually responded with a concrete answer -- definitive,
+  //     uncertain:false, regardless of whether that answer was success
+  //     or conflict.
+  //   - result.ok with an UNRECOGNIZED body: the server responded, but
+  //     we don't know what that response actually means for this
+  //     record -- ambiguous, uncertain:true.
+  //   - !result.ok: depends entirely on result.transportFailure, which
+  //     callRpc() sets honestly (see its own comment). A transport
+  //     failure (the request may never have reached the server, or may
+  //     have reached it and been fully processed with only the
+  //     response lost) is ambiguous -- uncertain:true. A clean
+  //     server-side rejection (the server responded with an error,
+  //     meaning the whole RPC invocation rolled back as a unit -- see
+  //     sql/009's sync_check_in, a single plpgsql function call with
+  //     no partial commits) is definitive -- uncertain:false, exactly
+  //     as safe to retry as a local-validation failure that never
+  //     reached the network at all.
+  function computeSyncOutcome(result) {
+    const now = new Date().toISOString();
+    if (!result.ok) {
+      return { status: 'failed', lastAttemptAt: now, lastError: result.error || 'Unknown error.', conflictDetails: null, attemptId: null, uncertain: !!result.transportFailure };
+    }
+    const body = result.data;
+    if (!body || (body.status !== 'inserted' && body.status !== 'noop' && body.status !== 'conflict')) {
+      return { status: 'failed', lastAttemptAt: now, lastError: 'Unexpected response from STAGING.', conflictDetails: null, attemptId: null, uncertain: true };
+    }
+    if (body.status === 'conflict') {
+      return { status: 'conflict', lastAttemptAt: now, lastError: null, conflictDetails: body, attemptId: null, uncertain: false };
+    }
+    return { status: 'synced', lastAttemptAt: now, lastError: null, conflictDetails: null, attemptId: null, uncertain: false };
+  }
+
+  function attemptEventSync() {
+    const info = appState.eventInfo;
+    if (!info || !canAttemptSync(info._sync)) return;
+    const eventId = info.id;
+    // Exactly the fields actually being sent -- captured now so the
+    // response handler below can tell a stale response (sent for THESE
+    // values) apart from a response that would describe the current,
+    // possibly since-edited, record (Step 273, item 6). attemptId is
+    // the primary guard (Step 275); these field captures remain as a
+    // defensive second check, since they cost nothing and catch any
+    // future code path that might reset status/attemptId without
+    // actually starting a real new request.
+    const sentDate = info.date, sentCity = info.city, sentPartnerOrg = info.partnerOrg;
+
+    if (!isValidEventForSync(info)) {
+      const invalidState = { ...appState, eventInfo: { ...info, _sync: { status: 'failed', lastAttemptAt: new Date().toISOString(), lastError: 'Event date is missing or invalid -- cannot sync until it is set.', conflictDetails: null, attemptId: null } } };
+      if (trySaveState(invalidState)) { appState = invalidState; renderEventSyncStatus(); }
+      return;
+    }
+
+    const attemptId = generateAttemptId();
+    const syncingState = { ...appState, eventInfo: { ...info, _sync: { ...info._sync, status: 'syncing', attemptId } } };
+    if (!trySaveState(syncingState)) return; // leave it exactly as it was -- still safely retryable later
+    appState = syncingState;
+    renderEventSyncStatus();
+
+    window.CharmStaging.callRpc('sync_event', {
+      p_id: info.id,
+      p_name: eventDisplayName(info),
+      p_date: info.date,
+      p_location: info.city || null,
+      p_partner_org: info.partnerOrg || null,
+    }).then(result => {
+      const current = appState.eventInfo;
+      // Stale-response guard (Step 274/275): attemptId is the
+      // authoritative check -- it uniquely identifies THIS request, so
+      // it alone is immune to a later edit's values coincidentally
+      // reverting to match what was originally sent (the exact race
+      // Step 274 found: content-only comparison can't tell "the same
+      // request" apart from "a different request that happens to match
+      // right now"). The id/status/field checks are kept as a defensive
+      // second layer, not the primary defense.
+      if (!current || current.id !== eventId || current._sync.status !== 'syncing' || current._sync.attemptId !== attemptId ||
+          current.date !== sentDate || current.city !== sentCity || current.partnerOrg !== sentPartnerOrg) return;
+      const outcome = computeSyncOutcome(result);
+      const resolvedState = { ...appState, eventInfo: { ...current, _sync: outcome } };
+      if (!trySaveState(resolvedState)) {
+        // The first save (into 'syncing') already succeeded, so leaving
+        // this stuck at 'syncing' in memory for the rest of the session
+        // would itself be a misleading, un-retryable state. Fall back to
+        // an in-memory-only 'failed' so the next sweep retries it --
+        // best effort, not guaranteed persisted, but never 'synced' and
+        // never permanently stuck.
+        current._sync = { status: 'failed', lastAttemptAt: outcome.lastAttemptAt, lastError: 'Could not save sync result to this device (storage may be full or unavailable).', conflictDetails: null, attemptId: null };
+        renderEventSyncStatus();
+        return;
+      }
+      appState = resolvedState;
+      renderEventSyncStatus();
+      // Step 291, item 8: the event is a dependency for every check-in --
+      // once it lands, sweep check-ins that were only waiting on it.
+      // Safe and cheap: a no-op for anything not currently eligible.
+      runCheckInSyncSweep();
+    });
+  }
+
+  function attemptMaterialSync(id) {
+    const m = appState.materialTypes.find(mt => mt.id === id);
+    if (!m || !canAttemptSync(m._sync)) return;
+    const label = m.label; // exactly what's about to be sent -- compared against on return
+
+    const attemptId = generateAttemptId();
+    const syncingState = { ...appState, materialTypes: appState.materialTypes.map(mt => mt.id === id ? { ...mt, _sync: { ...mt._sync, status: 'syncing', attemptId } } : mt) };
+    if (!trySaveState(syncingState)) return;
+    appState = syncingState;
+    renderMaterialsManageList();
+
+    window.CharmStaging.callRpc('sync_fee_material', { p_id: id, p_label: label }).then(result => {
+      const current = appState.materialTypes.find(mt => mt.id === id);
+      // Stale-response guard (Step 274/275): attemptId is the
+      // authoritative check; the existence/status/label checks remain
+      // as a defensive second layer.
+      if (!current || current._sync.status !== 'syncing' || current._sync.attemptId !== attemptId || current.label !== label) return;
+      const outcome = computeSyncOutcome(result);
+      const resolvedState = { ...appState, materialTypes: appState.materialTypes.map(mt => mt.id === id ? { ...mt, _sync: outcome } : mt) };
+      if (!trySaveState(resolvedState)) {
+        current._sync = { status: 'failed', lastAttemptAt: outcome.lastAttemptAt, lastError: 'Could not save sync result to this device (storage may be full or unavailable).', conflictDetails: null, attemptId: null };
+        renderMaterialsManageList();
+        return;
+      }
+      appState = resolvedState;
+      renderMaterialsManageList();
+      // Step 291, item 8: this material may have been the only thing a
+      // check-in was waiting on.
+      runCheckInSyncSweep();
+    });
+  }
+
+  function attemptReferralSourceSync(id) {
+    const s = appState.referralSources.find(rs => rs.id === id);
+    if (!s || !canAttemptSync(s._sync)) return;
+    const label = s.label;
+    // Step 282: the actual local value, captured at attempt-start exactly
+    // like label. Previously this was hardcoded to null regardless of
+    // the real local setting, which coalesces to false on the backend
+    // (sql/009's sync_referral_source: `coalesce(p_prompts_for_detail,
+    // false)`) -- silently misrepresenting any source whose local
+    // promptsForDetail is actually true (e.g. 'ura-other-program',
+    // seeded on STAGING with prompts_for_detail=true) and producing a
+    // permanent referral_source_mismatch conflict every attempt.
+    const promptsForDetail = s.promptsForDetail === true;
+
+    const attemptId = generateAttemptId();
+    const syncingState = { ...appState, referralSources: appState.referralSources.map(rs => rs.id === id ? { ...rs, _sync: { ...rs._sync, status: 'syncing', attemptId } } : rs) };
+    if (!trySaveState(syncingState)) return;
+    appState = syncingState;
+    renderReferralManageList();
+
+    window.CharmStaging.callRpc('sync_referral_source', { p_id: id, p_label: label, p_prompts_for_detail: promptsForDetail }).then(result => {
+      const current = appState.referralSources.find(rs => rs.id === id);
+      // Stale-response guard: attemptId is authoritative; label AND
+      // promptsForDetail are both backend-relevant fields actually sent
+      // in this request, so both are checked as the defensive second
+      // layer (Step 282, item 3) -- an older request whose
+      // promptsForDetail no longer matches the live record must never
+      // be allowed to mark it synced, same reasoning as label.
+      if (!current || current._sync.status !== 'syncing' || current._sync.attemptId !== attemptId ||
+          current.label !== label || (current.promptsForDetail === true) !== promptsForDetail) return;
+      const outcome = computeSyncOutcome(result);
+      const resolvedState = { ...appState, referralSources: appState.referralSources.map(rs => rs.id === id ? { ...rs, _sync: outcome } : rs) };
+      if (!trySaveState(resolvedState)) {
+        current._sync = { status: 'failed', lastAttemptAt: outcome.lastAttemptAt, lastError: 'Could not save sync result to this device (storage may be full or unavailable).', conflictDetails: null, attemptId: null };
+        renderReferralManageList();
+        return;
+      }
+      appState = resolvedState;
+      renderReferralManageList();
+      // Step 291, item 8: this referral source may have been the only
+      // thing a check-in was waiting on.
+      runCheckInSyncSweep();
+    });
+  }
+
+  // Triggered whenever the connection status becomes 'connected' (a
+  // fresh sign-in, or a session already found on launch) -- retries
+  // whatever is still 'pending' or 'failed'. Never touches appState.entries
+  // -- automatic catch-up of historical check-ins is Phase D's job, not
+  // this one's (Step 285, item 10).
+  function runCatalogSyncSweep() {
+    if (!appState.eventInfo) return;
+    attemptEventSync();
+    appState.materialTypes.forEach(m => attemptMaterialSync(m.id));
+    appState.referralSources.forEach(s => attemptReferralSourceSync(s.id));
+  }
+
+  /* ---------- Synchronization: check-ins (Step 285, Phase C) ----------
+   *
+   * Syncs one check-in's ORIGINAL bundle (the check-in itself, its
+   * materials, and its ORIGINAL payments/allocations) via sync_check_in,
+   * whose exact 12-argument signature and response shapes were verified
+   * against sql/009_add_event_fields_and_sync_functions.sql in Step 284
+   * -- not guessed. Mirrors the event/material/referral-source attempt
+   * functions exactly: build-then-confirm saves, a fresh attemptId per
+   * attempt, and a stale-response guard -- nothing new is invented here.
+   *
+   * Deliberately narrower than the catalog sync functions in three ways:
+   *   1. Only ever triggered once, right after a NEW check-in's local
+   *      save succeeds (index.html's save handler) -- never on edit,
+   *      never swept across existing entries. Automatic catch-up of
+   *      already-pending/failed check-ins belongs to Phase D.
+   *   2. An entry with any local paymentCorrections is never attempted
+   *      -- sync_check_in only ever syncs the ORIGINAL bundle, and this
+   *      phase does not implement sync_check_in_payment_correction. Left
+   *      'pending' rather than risk showing 'synced' while the entry's
+   *      real current payment picture (the correction) never reaches
+   *      STAGING.
+   *   3. Every fee_material_id referenced and the referral_source_id
+   *      must already show locally 'synced' before an attempt is even
+   *      made -- both are hard foreign keys in check_in_materials/
+   *      check_ins, so an unsynced dependency would otherwise fail as a
+   *      raw constraint-violation error rather than a clean conflict.
+   */
+
+  // Exactly the backend-relevant fields sync_check_in actually sends,
+  // serialized for comparison -- the same technique used for a
+  // material/referral source's label, generalized to a composite key
+  // since a check-in has several such fields at once.
+  function checkInSyncSnapshot(entry) {
+    return JSON.stringify({
+      zip: entry.zip,
+      referralSourceId: entry.referralSourceId,
+      referralOther: entry.referralOther || null,
+      materials: entry.materials,
+      generalDonation: entry.generalDonation,
+      payments: entry.payments,
+      discrepancy: entry.discrepancy,
+    });
+  }
+
+  // Item 7: the event, the check-in's own referral source, and every
+  // fee_material_id referenced in its materials must already be
+  // 'synced' locally. Returns false (never throws) if anything is
+  // missing or not yet confirmed -- the caller leaves the check-in
+  // 'pending' and makes no RPC call at all.
+  function checkInDependenciesSynced(entry) {
+    if (!appState.eventInfo || !appState.eventInfo._sync || appState.eventInfo._sync.status !== 'synced') return false;
+    const referral = appState.referralSources.find(s => s.id === entry.referralSourceId);
+    if (!referral || !referral._sync || referral._sync.status !== 'synced') return false;
+    const materialIds = Object.keys(entry.materials || {});
+    for (let i = 0; i < materialIds.length; i++) {
+      const m = appState.materialTypes.find(mt => mt.id === materialIds[i]);
+      if (!m || !m._sync || m._sync.status !== 'synced') return false;
+    }
+    return true;
+  }
+
+  // Item 5: deterministic, sequential-fill payment allocation --
+  // material fees first, donation second, per payment in entry order.
+  // Pure -- never mutates `entry`. Returns { ok:true, payments:[...] }
+  // (each with its own `allocations` array, zero-amount purposes
+  // omitted) or { ok:false, reason } for anything that cannot be
+  // reconciled -- the caller never sends an RPC in that case, matching
+  // "reject impossible or inconsistent payment totals locally."
+  function computeCheckInAllocations(entry) {
+    const materials = entry.materials || {};
+    const totalFee = Object.values(materials).reduce((sum, m) => sum + (m && typeof m.fee === 'number' ? m.fee : 0), 0);
+    const totalDonation = entry.generalDonation || 0;
+    const totalDue = round2(totalFee + totalDonation);
+    const payments = entry.payments || [];
+
+    for (let i = 0; i < payments.length; i++) {
+      if (!(payments[i].amount > 0)) {
+        return { ok: false, reason: 'A recorded payment amount is zero or negative; cannot synchronize until corrected.' };
+      }
+    }
+
+    const collected = round2(payments.reduce((sum, p) => sum + p.amount, 0));
+    const diff = round2(totalDue - collected); // > 0 shortfall, < 0 overpaid
+
+    if (diff < -0.004) {
+      return { ok: false, reason: 'Amount collected exceeds amount due; cannot synchronize until corrected.' };
+    }
+    if (diff > 0.004) {
+      if (!entry.discrepancy || Math.abs(round2(entry.discrepancy.amount) - diff) > 0.004) {
+        return { ok: false, reason: 'Payment total does not match the recorded discrepancy; cannot synchronize until corrected.' };
+      }
+    } else if (entry.discrepancy) {
+      return { ok: false, reason: 'A discrepancy is recorded but the amount collected already matches the amount due; cannot synchronize until corrected.' };
+    }
+
+    let remainingFee = totalFee;
+    let remainingDonation = totalDonation;
+    const paymentsOut = [];
+    for (let i = 0; i < payments.length; i++) {
+      const p = payments[i];
+      const feePart = round2(Math.min(p.amount, remainingFee));
+      remainingFee = round2(remainingFee - feePart);
+      const donationPart = round2(p.amount - feePart);
+      if (donationPart > remainingDonation + 0.004) {
+        // Should be structurally unreachable given the diff check above
+        // -- kept as a hard stop, never a guess, if it's ever reached.
+        return { ok: false, reason: 'Payment allocation does not fit within the amount due; cannot synchronize until corrected.' };
+      }
+      remainingDonation = round2(Math.max(0, remainingDonation - donationPart));
+      const allocations = [];
+      if (feePart > 0.004) allocations.push({ purpose: 'material_fee', amount: feePart });
+      if (donationPart > 0.004) allocations.push({ purpose: 'donation', amount: donationPart });
+      if (!allocations.length) {
+        return { ok: false, reason: 'A recorded payment amount is zero or negative; cannot synchronize until corrected.' };
+      }
+      paymentsOut.push({ id: p.id, methodId: p.methodId, amount: p.amount, allocations });
+    }
+    return { ok: true, payments: paymentsOut };
+  }
+
+  function attemptCheckInSync(id) {
+    const entry = appState.entries.find(e => e.id === id);
+    if (!entry || !canAttemptSync(entry._sync)) return;
+    // Item 8 -- see this section's header comment.
+    if (entry.paymentCorrections && entry.paymentCorrections.length) return;
+    // Item 7 -- leave pending, no RPC call, if any dependency isn't
+    // confirmed synced yet.
+    if (!checkInDependenciesSynced(entry)) return;
+
+    const allocationResult = computeCheckInAllocations(entry);
+    if (!allocationResult.ok) {
+      // A genuine local data problem (not a timing issue like a missing
+      // dependency) -- marked 'failed' so it's visible and would be
+      // retried if the underlying data were ever corrected, but no RPC
+      // call is made. uncertain:false -- this never reached the
+      // network at all, so it is definitely safe for item 7's "edit is
+      // always safe" rule to apply.
+      const invalidState = { ...appState, entries: appState.entries.map(e => e.id === id ? { ...e, _sync: { status: 'failed', lastAttemptAt: new Date().toISOString(), lastError: allocationResult.reason, conflictDetails: null, attemptId: null, uncertain: false } } : e) };
+      if (trySaveState(invalidState)) { appState = invalidState; renderCheckInSyncSummary(); }
+      return;
+    }
+
+    // Exactly what's about to be sent -- captured now for the
+    // stale-response guard below (Step 274/275's methodology, applied
+    // to a composite snapshot since a check-in has several
+    // backend-relevant fields at once rather than just one label).
+    const snapshot = checkInSyncSnapshot(entry);
+    const zip = entry.zip;
+    const referralSourceId = entry.referralSourceId;
+    const referralOther = entry.referralOther || null;
+    const discrepancyReason = entry.discrepancy ? entry.discrepancy.reasonType : null;
+    const discrepancyAmount = entry.discrepancy ? entry.discrepancy.amount : null;
+    const discrepancyNote = entry.discrepancy ? (entry.discrepancy.note || null) : null;
+    const materialsPayload = Object.keys(entry.materials || {}).map(mid => {
+      const m = entry.materials[mid];
+      return {
+        fee_material_id: mid,
+        quantity: m.qty,
+        unit_price_charged: (m.unitPriceCharged === undefined ? null : m.unitPriceCharged),
+        fee_waived: false,
+        waiver_note: null,
+      };
+    });
+    const paymentsPayload = allocationResult.payments.map(p => ({
+      id: p.id, method_id: p.methodId, amount: p.amount,
+      cash_tendered: null, cash_change: null, reference: null,
+      allocations: p.allocations,
+    }));
+
+    const attemptId = generateAttemptId();
+    // uncertain:false here -- a fresh attempt is about to actually be
+    // sent; whatever it resolves to (including a stranded restart or a
+    // transport failure) recomputes this honestly on its own path
+    // below, so there's nothing to preserve from before.
+    const syncingState = { ...appState, entries: appState.entries.map(e => e.id === id ? { ...e, _sync: { ...e._sync, status: 'syncing', attemptId, uncertain: false } } : e) };
+    if (!trySaveState(syncingState)) return; // leave exactly as it was -- still safely retryable later -- item 9/10
+    appState = syncingState;
+    renderCheckInSyncSummary();
+
+    window.CharmStaging.callRpc('sync_check_in', {
+      p_check_in_id: entry.id,
+      p_event_id: appState.eventInfo.id,
+      p_checked_in_at: entry.timestamp,
+      p_zip_code: zip,
+      p_referral_source_id: referralSourceId,
+      p_referral_other: referralOther,
+      p_notes: null,
+      p_original_discrepancy_reason: discrepancyReason,
+      p_original_discrepancy_amount: discrepancyAmount,
+      p_original_discrepancy_note: discrepancyNote,
+      p_materials: materialsPayload,
+      p_payments: paymentsPayload,
+    }).then(result => {
+      const current = appState.entries.find(e => e.id === id);
+      // Stale-response guard: attemptId is authoritative; the
+      // existence/status/full-snapshot checks remain as a defensive
+      // second layer, exactly mirroring the catalog attempt functions.
+      if (!current || current._sync.status !== 'syncing' || current._sync.attemptId !== attemptId || checkInSyncSnapshot(current) !== snapshot) return;
+      const outcome = computeSyncOutcome(result);
+      const resolvedState = { ...appState, entries: appState.entries.map(e => e.id === id ? { ...e, _sync: outcome } : e) };
+      if (!trySaveState(resolvedState)) {
+        // uncertain:true unconditionally -- a real RPC round-trip just
+        // happened and gave SOME answer (outcome), but we couldn't
+        // persist it. The in-memory record below is now out of sync
+        // with what we actually know, so it must be treated as
+        // untrustworthy rather than assumed safe, regardless of what
+        // outcome.status was.
+        current._sync = { status: 'failed', lastAttemptAt: outcome.lastAttemptAt, lastError: 'Could not save sync result to this device (storage may be full or unavailable).', conflictDetails: null, attemptId: null, uncertain: true };
+        renderCheckInSyncSummary();
+        return;
+      }
+      appState = resolvedState;
+      renderCheckInSyncSummary();
+      // Deliberately does NOT call runCheckInSyncSweep() here: one
+      // check-in's own outcome never changes any OTHER check-in's
+      // eligibility (entries don't depend on each other), and calling
+      // the sweep from here would cascade -- every check-in's own
+      // resolution re-sweeping every OTHER pending/failed check-in,
+      // repeatedly, within a single batch. Item 8 is specifically about
+      // a CATALOG/event dependency finishing sync and unblocking a
+      // check-in that was waiting on it -- that trigger lives on
+      // attemptEventSync/attemptMaterialSync/attemptReferralSourceSync's
+      // own resolution handlers instead, not here.
+    });
+  }
+
+  /* ---------- Phase D: offline catch-up (Step 291) ----------
+   *
+   * The sweep itself adds no new RPC logic at all -- it only decides
+   * WHICH check-ins to call the existing, unmodified attemptCheckInSync()
+   * for, reusing every safeguard already built in Phases A-C and Step
+   * 290: the pending/failed gate, the paymentCorrections exclusion, the
+   * dependency check, the attemptId+snapshot stale-response guard, and
+   * the uncertain-aware edit protection. This section adds no new
+   * payment-allocation logic and sends no new RPC arguments.
+   */
+
+  // True whenever at least one check-in is actually mid-flight. Derived
+  // directly from live state rather than a separate mutable flag, so it
+  // can never drift out of sync with reality (no "forgot to clear the
+  // flag" failure mode) -- used only to drive the manual Retry Now
+  // button's enabled state and the sync summary's display; it is never
+  // consulted by the sweep itself (see runCheckInSyncSweep()'s own
+  // comment for why the sweep must NOT gate on this).
+  function isCheckInSyncActive() {
+    return appState.entries.some(e => e._sync && e._sync.status === 'syncing');
+  }
+
+  // Item 11's exact counts. 'needsReview' deliberately folds in
+  // 'conflict' and 'edited_after_sync' alongside 'needs_review' itself
+  // -- all three are terminal, human-review states that automatic sync
+  // will never touch, so grouping them answers "how many check-ins need
+  // my attention" in one number rather than three.
+  function computeCheckInSyncCounts() {
+    const counts = { total: appState.entries.length, synced: 0, pending: 0, failed: 0, syncing: 0, needsReview: 0 };
+    appState.entries.forEach(e => {
+      const status = e._sync && e._sync.status;
+      if (status === 'synced') counts.synced++;
+      else if (status === 'pending' || !status) counts.pending++;
+      else if (status === 'failed') counts.failed++;
+      else if (status === 'syncing') counts.syncing++;
+      else if (status === 'conflict' || status === 'edited_after_sync' || status === 'needs_review') counts.needsReview++;
+    });
+    return counts;
+  }
+
+  function renderCheckInSyncSummary() {
+    const el = document.getElementById('checkin-sync-summary');
+    const btn = document.getElementById('checkin-retry-now-btn');
+    if (!el) return; // tab not yet rendered/present -- nothing to update
+    const c = computeCheckInSyncCounts();
+    if (c.total === 0) {
+      el.innerHTML = '<p class="muted">No check-ins recorded yet.</p>';
+    } else {
+      el.innerHTML =
+        `<div class="stat-row"><span>Total check-ins</span><span>${c.total}</span></div>` +
+        `<div class="stat-row"><span>Synced</span><span>${c.synced}</span></div>` +
+        `<div class="stat-row"><span>Pending${c.syncing ? ' (' + c.syncing + ' syncing now)' : ''}</span><span>${c.pending}</span></div>` +
+        `<div class="stat-row"><span>Failed</span><span>${c.failed}</span></div>` +
+        `<div class="stat-row"><span>Needs review</span><span>${c.needsReview}</span></div>`;
+    }
+    if (btn) {
+      // Item 10: disabled while offline, or while something is already
+      // mid-flight -- a safe no-op either way even without this (the
+      // handler itself checks again), but this avoids inviting a click
+      // that would visibly do nothing.
+      const connected = !!(window.CharmStaging && window.CharmStaging.getStatus().state === 'connected');
+      btn.disabled = !connected || isCheckInSyncActive();
+    }
+  }
+
+  // Item 9/10: the manual control. Never bypasses any safeguard above --
+  // it is simply a user-initiated call to the same sweep the automatic
+  // triggers use.
+  function handleCheckInRetryNow() {
+    if (!window.CharmStaging || window.CharmStaging.getStatus().state !== 'connected') return;
+    if (isCheckInSyncActive()) return;
+    runCheckInSyncSweep();
+    renderCheckInSyncSummary();
+  }
+
+  // Item 1/4/5/6/8/12/13/14: the sweep. Considers every entry currently
+  // 'pending' or 'failed' and calls the existing attemptCheckInSync() for
+  // each -- nothing else. Every exclusion (synced/syncing/conflict/
+  // edited_after_sync/needs_review, non-empty paymentCorrections, an
+  // unsynced dependency, a locally-invalid allocation) is already
+  // enforced INSIDE attemptCheckInSync() itself (Phases A-C, Step 290),
+  // so this function does not duplicate any of that logic -- it would be
+  // just as safe (if less useful) to call attemptCheckInSync() on every
+  // entry unconditionally.
+  //
+  // Deliberately does NOT gate on isCheckInSyncActive(): doing so would
+  // mean a check-in whose dependency finishes syncing WHILE a different,
+  // unrelated check-in happens to still be mid-flight would be skipped
+  // this round and could be left pending longer than necessary (item 8
+  // explicitly forbids leaving check-ins "permanently pending simply
+  // because the catalog was still syncing"). Per-entry duplicate-request
+  // protection does not need this gate either: attemptCheckInSync()'s own
+  // canAttemptSync() check, combined with the synchronous "mark syncing"
+  // write that happens before any RPC call returns, already makes it
+  // impossible for two overlapping sweep calls to dispatch two requests
+  // for the SAME entry (item 12) -- the second call simply sees
+  // 'syncing' and skips it, exactly like the catalog sweep already does
+  // for materials/referral sources.
+  function runCheckInSyncSweep() {
+    if (!appState.eventInfo) return;
+    if (!window.CharmStaging || window.CharmStaging.getStatus().state !== 'connected') return;
+    appState.entries.forEach(e => {
+      const status = e._sync && e._sync.status;
+      if (status === 'pending' || status === 'failed') attemptCheckInSync(e.id);
+    });
+  }
+
+  function renderEventSyncStatus() {
+    const el = document.getElementById('header-sync-status');
+    if (!el) return;
+    const info = appState.eventInfo;
+    const sync = info && info._sync;
+    if (!sync) { el.textContent = ''; return; }
+    const labels = { pending: 'Not yet synced', syncing: 'Syncing…', synced: 'Synced to STAGING', failed: 'Sync failed', conflict: 'Sync conflict -- needs review' };
+    el.textContent = 'Event: ' + (labels[sync.status] || sync.status);
+  }
+
+  function syncStatusBadge(sync) {
+    if (!sync) return '';
+    const labels = { pending: 'not synced', syncing: 'syncing…', synced: 'synced', failed: 'sync failed', conflict: 'conflict' };
+    return ' <span class="muted sync-badge">(' + (labels[sync.status] || sync.status) + ')</span>';
   }
 
   function init() {
@@ -940,8 +1679,25 @@
 
     if (isEditingSetupOnly) {
       // Preserve the existing event's id (and any other existing fields) --
-      // only date/city/partnerOrg are meant to change here.
-      const updatedEventInfo = { ...appState.eventInfo, date, city, partnerOrg };
+      // only date/city/partnerOrg are meant to change here. Every one of
+      // those three fields is backend-relevant (they map directly onto
+      // sync_event's p_date/p_location/p_partner_org, and p_name is
+      // derived from date+city) -- so ANY edit here always resets to
+      // 'pending', regardless of the PREVIOUS status, not just when it
+      // was 'synced' (Step 273, item 3/6). This matters for two cases
+      // the narrower original check missed: a 'conflict' that's never
+      // retried unless something resets it away from 'conflict', and an
+      // edit landing while a sync is still 'syncing' -- resetting to
+      // 'pending' here is exactly what makes attemptEventSync()'s own
+      // stale-response guard correctly drop that now-superseded
+      // in-flight response when it eventually resolves, instead of
+      // letting it mark this (just-changed) record synced. sync_event's
+      // own comparison logic settles the rest: a harmless 'noop' if
+      // nothing that matters actually changed, 'conflict' if STAGING's
+      // row genuinely differs.
+      const existingSync = appState.eventInfo && appState.eventInfo._sync;
+      const nextSync = { status: 'pending', lastAttemptAt: existingSync ? existingSync.lastAttemptAt : null, lastError: null, conflictDetails: null, attemptId: null };
+      const updatedEventInfo = { ...appState.eventInfo, date, city, partnerOrg, _sync: nextSync };
       const proposedState = { ...appState, eventInfo: updatedEventInfo };
       if (!trySaveState(proposedState)) {
         alert('Could not save your changes to this device (storage may be full or unavailable). Please try again.');
@@ -950,6 +1706,7 @@
       appState.eventInfo = updatedEventInfo;
       eventIdConfirmedPersisted = true;
       showAppScreen();
+      attemptEventSync();
       return;
     }
 
@@ -962,7 +1719,7 @@
 
     // Fee/material and referral-source lists are kept across new events; only event info and entries reset.
     const proposedState = {
-      eventInfo: { id: newEventId, date, city, partnerOrg },
+      eventInfo: { id: newEventId, date, city, partnerOrg, _sync: defaultSyncMeta() },
       entries: [],
       materialTypes: appState.materialTypes,
       referralSources: appState.referralSources,
@@ -980,6 +1737,7 @@
     appState = proposedState;
     eventIdConfirmedPersisted = true;
     showAppScreen();
+    attemptEventSync();
   }
 
   function showAppScreen() {
@@ -989,6 +1747,7 @@
     document.getElementById('header-city').textContent = info.city || '—';
     const dp = [info.date, info.partnerOrg].filter(Boolean).join(' · ');
     document.getElementById('header-date-partner').textContent = dp || '—';
+    renderEventSyncStatus();
     switchTab('checkin');
     refreshVehicleCount();
     renderZipSuggestions();
@@ -1422,10 +2181,93 @@
       return;
     }
 
+    // Step 285: captures the id of a brand-new check-in (never set for
+    // an edit) so a sync attempt can be triggered once, after the save
+    // below is confirmed to have actually persisted -- requirement 9
+    // deliberately limits this to creation only; editing never
+    // re-triggers an automatic attempt in this phase.
+    let newlyCreatedEntryId = null;
     let proposedEntries;
     if (existingEntry) {
       const previousEffective = getEffectivePayment(existingEntry);
       const paymentsChanged = !paymentsMatch(previousEffective.payments, payments) || !discrepancyMatch(previousEffective.discrepancy, discrepancy);
+
+      // Step 269: once a check-in is confirmed 'synced', ANY local edit
+      // here (even one that doesn't touch payments at all) must mark it
+      // as having diverged from what STAGING has on record -- handled
+      // as 'synced' -> 'edited_after_sync'.
+      //
+      // Step 286: a SECOND transition is needed for 'syncing' specifically.
+      // Editing a check-in whose sync attempt is still in flight is
+      // unsafe to leave alone: the in-flight request's own attemptId/
+      // snapshot guard (attemptCheckInSync) will correctly reject that
+      // response when it eventually arrives -- so the edit itself is
+      // never corrupted -- but the record would otherwise stay stuck
+      // showing 'syncing' until the next app restart, AND, critically,
+      // automatically resubmitting the EDITED bundle is not safe here
+      // the way it is for materials/referral sources/events: Check-In
+      // V2 regenerates a brand-new random id for every payment row on
+      // every save, even an edit that doesn't touch payments at all
+      // (Step 284/285's confirmed finding). If the ORIGINAL request
+      // already landed on STAGING before the edit, sync_check_in's own
+      // "fill in missing children" logic (sql/009) would see those new
+      // payment ids as rows it has simply never heard of yet and INSERT
+      // them alongside the originals -- silently double-counting real
+      // money, not a safe, visible conflict. We have no way to know,
+      // locally, whether the original request landed, failed, or is
+      // still genuinely in flight -- so rather than guess, this
+      // transitions to 'needs_review': a manual-review state, excluded
+      // from automatic synchronization exactly like 'conflict'/
+      // 'edited_after_sync' (canAttemptSync only ever allows 'pending'/
+      // 'failed'), with attemptId cleared so the stale in-flight
+      // response's attemptId check also no longer matches (belt and
+      // suspenders alongside the snapshot guard).
+      //
+      // Step 290: a THIRD, related case needs the exact same treatment --
+      // a 'pending' or 'failed' check-in whose _sync.uncertain is true.
+      // This is NOT the in-flight case above (status isn't 'syncing'
+      // anymore), but it carries the identical risk: uncertain:true
+      // means a request for this record may already have reached
+      // STAGING with no definitive response ever received for it
+      // (restart-recovery after an interrupted sync, or a transport
+      // failure that might have landed server-side before the response
+      // was lost -- see migrateState() and callRpc()'s own comments).
+      // Editing it would regenerate payment ids on a bundle that might
+      // already be partially committed, exactly the same danger as
+      // editing a 'syncing' record. A 'pending'/'failed' record whose
+      // uncertain is false (never dispatched, or dispatched and
+      // DEFINITELY, cleanly rejected) has no such risk and is
+      // deliberately left alone here -- editing it stays safe and must
+      // not require manual review (item 7).
+      //
+      // Every OTHER existing status (pending/failed WITHOUT uncertainty,
+      // conflict, already edited_after_sync, already needs_review) is
+      // left completely untouched here -- this is not a general-purpose
+      // reset. This computed value only takes effect if the save below
+      // actually succeeds -- see trySaveCheckinEntries() and the
+      // discard-on-failure handling that already exists for the rest of
+      // this proposed entry, which this relies on rather than duplicates.
+      const nextSync = (existingEntry._sync && existingEntry._sync.status === 'synced')
+        ? { ...existingEntry._sync, status: 'edited_after_sync' }
+        : (existingEntry._sync && existingEntry._sync.status === 'syncing')
+          ? {
+              status: 'needs_review',
+              lastAttemptAt: existingEntry._sync.lastAttemptAt,
+              lastError: "Edited while a synchronization attempt was still in progress; the original request's outcome on STAGING is unknown. This check-in will not be automatically resynchronized -- review it manually.",
+              conflictDetails: null,
+              attemptId: null,
+              uncertain: false,
+            }
+          : (existingEntry._sync && existingEntry._sync.uncertain)
+            ? {
+                status: 'needs_review',
+                lastAttemptAt: existingEntry._sync.lastAttemptAt,
+                lastError: "Edited while a prior synchronization attempt's outcome on STAGING was uncertain. This check-in will not be automatically resynchronized -- review it manually.",
+                conflictDetails: null,
+                attemptId: null,
+                uncertain: false,
+              }
+            : existingEntry._sync;
 
       let updatedEntry;
       if (!previousEffective.tracked || !paymentsChanged) {
@@ -1434,7 +2276,7 @@
         // preserve yet) or the payment picture is unchanged (editing an
         // unrelated field must never create a correction). Either way:
         // write payments/discrepancy directly, no correction record.
-        updatedEntry = { ...existingEntry, zip, referralSourceId, referralOther, materials, generalDonation, totalMoney, payments, discrepancy };
+        updatedEntry = { ...existingEntry, zip, referralSourceId, referralOther, materials, generalDonation, totalMoney, payments, discrepancy, _sync: nextSync };
       } else {
         // The payment picture actually changed on an entry that already
         // had a recorded original -- preserve that original (and any
@@ -1450,6 +2292,7 @@
           ...existingEntry,
           zip, referralSourceId, referralOther, materials, generalDonation, totalMoney,
           paymentCorrections: [...(existingEntry.paymentCorrections || []), newCorrection],
+          _sync: nextSync,
         };
       }
       proposedEntries = appState.entries.map(e => (e.id === existingEntry.id ? updatedEntry : e));
@@ -1459,7 +2302,9 @@
         timestamp: new Date().toISOString(),
         zip, referralSourceId, referralOther, materials, generalDonation, totalMoney,
         payments, discrepancy,
+        _sync: defaultSyncMeta(),
       };
+      newlyCreatedEntryId = newEntry.id;
       proposedEntries = [...appState.entries, newEntry];
     }
 
@@ -1502,6 +2347,11 @@
     resetCheckinForm();
     refreshVehicleCount();
     renderZipSuggestions();
+    // Step 285, item 9: only a brand-new check-in triggers a sync
+    // attempt, and only once, here, after the local save above is
+    // confirmed persisted. Editing an entry (existingEntry truthy)
+    // never does -- see attemptCheckInSync()'s own comment for why.
+    if (newlyCreatedEntryId) attemptCheckInSync(newlyCreatedEntryId);
   }
 
   function refreshVehicleCount() {
@@ -1609,6 +2459,12 @@
 
     renderPaymentBreakdown(t);
     renderRecentEntries();
+    // Step 291: purely additive -- reuses every existing call site of
+    // renderTotals() (check-in save, delete, tab switch, catalog edits)
+    // to keep the sync summary fresh, with no change to the financial
+    // computation above (computeTotals() and everything derived from
+    // it here are untouched).
+    renderCheckInSyncSummary();
   }
 
   function renderPaymentBreakdown(t) {
@@ -1718,6 +2574,28 @@
   }
 
   function deleteEntry(id) {
+    const entry = appState.entries.find(e => e.id === id);
+    if (!entry) return;
+
+    // Step 269: an entry with no _sync at all (shouldn't happen once
+    // migrateState() has run, but handled defensively) is treated the
+    // same as 'pending' -- never synchronized, so deleting it locally
+    // has no remote record to diverge from.
+    const status = entry._sync && entry._sync.status;
+
+    if (status === 'synced' || status === 'edited_after_sync') {
+      alert('This check-in already exists in STAGING and cannot be deleted here. Correcting or removing an already-synchronized record requires a workflow that is not implemented yet -- it must be reconciled after the event instead.');
+      return;
+    }
+    if (status === 'syncing' || status === 'conflict' || status === 'needs_review') {
+      // Step 286: 'needs_review' means a sync attempt was in flight
+      // when this check-in was last edited -- its outcome on STAGING
+      // is genuinely unknown (it may have already landed), so it gets
+      // exactly the same deletion precaution as 'syncing'/'conflict'.
+      alert('This check-in\'s STAGING status cannot be confirmed right now (' + status + '), so deleting it locally is blocked as a precaution until that resolves.');
+      return;
+    }
+
     if (!confirm('Delete this check-in? This cannot be undone.')) return;
     appState.entries = appState.entries.filter(e => e.id !== id);
     if (editingEntryId === id) cancelEditEntry();
@@ -1735,7 +2613,7 @@
     container.innerHTML = appState.materialTypes.map(m => `
       <div class="material-manage-row">
         <div class="material-manage-top">
-          <input type="text" value="${escapeHtml(m.label)}" onchange="updateMaterialField('${m.id}','label', this.value)">
+          <input type="text" value="${escapeHtml(m.label)}" onchange="updateMaterialField('${m.id}','label', this.value)">${syncStatusBadge(m._sync)}
           <label class="active-toggle">
             <input type="checkbox" ${m.active ? 'checked' : ''} onchange="updateMaterialField('${m.id}','active', this.checked)">
             Active
@@ -1765,25 +2643,58 @@
     const m = appState.materialTypes.find(mt => mt.id === id);
     if (!m) return;
 
+    if (field === 'defaultPrice' || field === 'eventPrice') {
+      // Pricing edits are hardened separately -- see updateMaterialPrice()
+      // -- and are never backend-relevant (sync_fee_material has no
+      // price argument at all; fee_materials has no price column), so
+      // they must never be represented as affecting sync status
+      // (Step 273, item 4).
+      updateMaterialPrice(id, field, value);
+      return;
+    }
+
+    let proposedMaterial;
     if (field === 'label') {
       const trimmed = String(value).trim();
       if (!trimmed) { renderMaterialsManageList(); return; }
-      m.label = trimmed;
-    } else if (field === 'defaultPrice' || field === 'eventPrice') {
-      // Pricing edits are hardened separately -- see updateMaterialPrice()
-      // -- so a failed save can never leave the displayed or live price
-      // different from what's actually persisted.
-      updateMaterialPrice(id, field, value);
-      return;
+      // label is the only field sync_fee_material actually sends, so
+      // changing it always invalidates whatever this item's _sync
+      // status currently claims -- synced, conflicted, or mid-flight --
+      // and is always reset to 'pending' here (Step 273, items 3 and 6),
+      // clearing any stale error/conflict left over from the previous
+      // label. If a sync for the OLD label is still in flight, this
+      // moves status away from 'syncing', so attemptMaterialSync()'s own
+      // stale-response guard correctly drops that response instead of
+      // marking the now-different record synced.
+      proposedMaterial = { ...m, label: trimmed, _sync: { status: 'pending', lastAttemptAt: m._sync ? m._sync.lastAttemptAt : null, lastError: null, conflictDetails: null, attemptId: null } };
     } else if (field === 'active') {
-      m.active = !!value;
+      // active is never sent to the backend (sync_fee_material has no
+      // such argument) -- never represented as affecting sync status.
+      proposedMaterial = { ...m, active: !!value };
+    } else {
+      return;
     }
 
-    saveState();
+    // Build-then-confirm (Step 273, item 1): the same safe-save pattern
+    // already used by updateMaterialPrice()/addMaterialType() elsewhere
+    // in this file. appState is only ever reassigned once the write is
+    // confirmed to have actually persisted -- a failed save leaves both
+    // the live state and whatever re-renders from it exactly as they
+    // were, never a half-applied edit or a status change that didn't
+    // really stick.
+    const proposedState = { ...appState, materialTypes: appState.materialTypes.map(mt => mt.id === id ? proposedMaterial : mt) };
+    if (!trySaveState(proposedState)) {
+      alert('Could not save this change to this device (storage may be full or unavailable). The previous value has been kept.');
+      renderMaterialsManageList();
+      return;
+    }
+
+    appState = proposedState;
     populateMaterialRows();
     updateSubtotal();
     renderMaterialsManageList();
     renderTotals();
+    if (field === 'label') attemptMaterialSync(id);
   }
 
   // Hardened edit for a material's Default Price or This Event's Price.
@@ -1842,7 +2753,7 @@
     const newId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
     const proposedState = {
       ...appState,
-      materialTypes: [...appState.materialTypes, { id: newId, label, defaultPrice: price, active: true }],
+      materialTypes: [...appState.materialTypes, { id: newId, label, defaultPrice: price, active: true, _sync: defaultSyncMeta() }],
       eventMaterialPrices: { ...appState.eventMaterialPrices, [newId]: price },
     };
 
@@ -1858,6 +2769,7 @@
     updateSubtotal();
     renderMaterialsManageList();
     renderTotals();
+    attemptMaterialSync(newId);
   }
 
   /* ---------- Manage Referral Sources ---------- */
@@ -1867,11 +2779,12 @@
     if (!appState.referralSources.length) { container.innerHTML = '<p class="muted">No referral sources yet.</p>'; return; }
     container.innerHTML = appState.referralSources.map(s => `
       <div class="material-manage-row">
-        <input type="text" value="${escapeHtml(s.label)}" onchange="updateReferralField('${s.id}','label', this.value)">
+        <input type="text" value="${escapeHtml(s.label)}" onchange="updateReferralField('${s.id}','label', this.value)">${syncStatusBadge(s._sync)}
         <label class="active-toggle">
           <input type="checkbox" ${s.active ? 'checked' : ''} onchange="updateReferralField('${s.id}','active', this.checked)">
           Active
         </label>
+        ${s._sync && s._sync.status === 'conflict' ? `<button type="button" class="btn-icon-sm" onclick="retryReferralSourceSync('${s.id}')">Retry sync</button>` : ''}
       </div>
     `).join('');
   }
@@ -1880,18 +2793,78 @@
     const s = appState.referralSources.find(rs => rs.id === id);
     if (!s) return;
 
+    let proposedSource;
     if (field === 'label') {
       const trimmed = String(value).trim();
       if (!trimmed) { renderReferralManageList(); return; }
-      s.label = trimmed;
+      // label is one of two fields sync_referral_source actually
+      // compares/sends -- changing it always resets status to 'pending'
+      // (Step 273, items 3 and 6), same reasoning as updateMaterialField:
+      // it invalidates a 'synced'/'conflict' status and, if a sync for
+      // the OLD label is still in flight, moves status away from
+      // 'syncing' so attemptReferralSourceSync()'s stale-response guard
+      // correctly drops that response.
+      proposedSource = { ...s, label: trimmed, _sync: { status: 'pending', lastAttemptAt: s._sync ? s._sync.lastAttemptAt : null, lastError: null, conflictDetails: null, attemptId: null } };
+    } else if (field === 'promptsForDetail') {
+      // The other field sync_referral_source actually sends (Step 282)
+      // -- backend-relevant exactly like label, so changing it must
+      // invalidate any existing sync status/attemptId the same way.
+      // Nothing in the current Manage Referral Sources screen calls
+      // this yet (only 'ura-other-program' has this flag, seeded
+      // locally); kept correct and testable for if/when a control is
+      // added, without building new UI now.
+      proposedSource = { ...s, promptsForDetail: !!value, _sync: { status: 'pending', lastAttemptAt: s._sync ? s._sync.lastAttemptAt : null, lastError: null, conflictDetails: null, attemptId: null } };
     } else if (field === 'active') {
-      s.active = !!value;
+      // active is never sent to the backend -- sync_referral_source
+      // always inserts active=true and never updates or even compares
+      // it afterward -- so it must never be represented as affecting
+      // sync status (Step 273, item 4).
+      proposedSource = { ...s, active: !!value };
+    } else {
+      return;
     }
 
-    saveState();
+    const proposedState = { ...appState, referralSources: appState.referralSources.map(rs => rs.id === id ? proposedSource : rs) };
+    if (!trySaveState(proposedState)) {
+      alert('Could not save this change to this device (storage may be full or unavailable). The previous value has been kept.');
+      renderReferralManageList();
+      return;
+    }
+
+    appState = proposedState;
     populateReferralOptions();
     renderReferralManageList();
     renderTotals();
+    if (field === 'label' || field === 'promptsForDetail') attemptReferralSourceSync(id);
+  }
+
+  // Explicit, user-initiated retry for a referral source stuck in
+  // 'conflict' (Step 282, item 6). Deliberately the ONLY way a
+  // conflicted referral source gets retried -- runCatalogSyncSweep()
+  // never touches 'conflict' items, and this function does nothing for
+  // any OTHER referral source, so clicking it can never cause a
+  // blanket auto-retry of unrelated conflicts (item 7). It never
+  // renames anything: it only resets this one record's _sync back to
+  // 'pending' (clearing the stale conflictDetails/attemptId) and then
+  // re-attempts with whatever the CURRENT local label/promptsForDetail
+  // actually are -- sync_referral_source's own insert/noop/conflict
+  // logic decides the real outcome; this never overwrites or assumes
+  // anything about the backend record.
+  function retryReferralSourceSync(id) {
+    const s = appState.referralSources.find(rs => rs.id === id);
+    if (!s || !s._sync || s._sync.status !== 'conflict') return;
+
+    const resetSource = { ...s, _sync: { status: 'pending', lastAttemptAt: s._sync.lastAttemptAt, lastError: null, conflictDetails: null, attemptId: null } };
+    const proposedState = { ...appState, referralSources: appState.referralSources.map(rs => rs.id === id ? resetSource : rs) };
+    if (!trySaveState(proposedState)) {
+      alert('Could not start the retry (storage may be full or unavailable). Please try again.');
+      renderReferralManageList();
+      return;
+    }
+
+    appState = proposedState;
+    renderReferralManageList();
+    attemptReferralSourceSync(id);
   }
 
   function addReferralSource() {
@@ -1899,15 +2872,28 @@
     const label = nameInput.value.trim();
     if (!label) { alert('Enter a name for the referral source.'); return; }
 
-    appState.referralSources.push({
-      id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
-      label, active: true,
-    });
-    saveState();
+    // Build-then-confirm (Step 273, item 2): a failed write here must
+    // leave the new referral source out of appState entirely -- not
+    // partially added, and never eligible to trigger a sync attempt at
+    // all (attemptReferralSourceSync() is only reached below once the
+    // save is confirmed to have actually persisted).
+    const newId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+    const proposedState = {
+      ...appState,
+      referralSources: [...appState.referralSources, { id: newId, label, active: true, _sync: defaultSyncMeta() }],
+    };
+
+    if (!trySaveState(proposedState)) {
+      alert('Could not save this new referral source to this device (storage may be full or unavailable). Nothing was added; please try again.');
+      return;
+    }
+
+    appState = proposedState;
     nameInput.value = '';
     populateReferralOptions();
     renderReferralManageList();
     renderTotals();
+    attemptReferralSourceSync(newId);
   }
 
   /* ---------- CSV export ---------- */
@@ -2531,6 +3517,20 @@
   document.addEventListener('DOMContentLoaded', function () {
     if (window.CharmStaging) {
       window.CharmStaging.onStatusChange(renderStagingStatus);
+      // Step 272, Phase B (catalogs/event) + Step 291, item 7 (check-ins):
+      // whenever the connection becomes 'connected' (a fresh sign-in, or
+      // a session already found on launch), retry anything still
+      // 'pending'/'failed'. This is the SAME existing listener -- no
+      // second onStatusChange registration was added. lastConnectedState
+      // avoids re-running either sweep on every unrelated status
+      // notification (e.g. 'checking'), since onStatusChange fires on
+      // every change, not just this one.
+      let lastConnectedState = false;
+      window.CharmStaging.onStatusChange(function (s) {
+        const isConnected = s.state === 'connected';
+        if (isConnected && !lastConnectedState) { runCatalogSyncSweep(); runCheckInSyncSweep(); }
+        lastConnectedState = isConnected;
+      });
       window.CharmStaging.checkExistingSession();
     }
   });

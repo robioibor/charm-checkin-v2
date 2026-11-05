@@ -136,11 +136,53 @@
     fn(status);
   }
 
+  // Generic RPC call for a signed-in session (Step 272, Phase B). Reuses
+  // the same lazily-created client and the session supabase-js already
+  // manages -- no separate auth path, no stored password. Resolves
+  // (never rejects) with { ok, data } or { ok: false, error, transportFailure }
+  // so a caller never needs its own try/catch.
+  //
+  // transportFailure (Step 290) distinguishes two very different
+  // ok:false causes, which a caller may need to tell apart (see
+  // computeSyncOutcome() in index.html):
+  //   - true: the request itself never completed a round trip (a
+  //     thrown fetch -- DNS failure, connection drop, timeout) or was
+  //     never even attempted ("not signed in"/"not connected"). In the
+  //     thrown-fetch case specifically, the server may still have
+  //     received and fully processed the request before the response
+  //     was lost -- this is AMBIGUOUS, never safe to treat as "did not
+  //     happen." ("Not signed in"/"not connected" are reported the
+  //     same way for simplicity, even though nothing was dispatched at
+  //     all in those cases -- a caller that cares about that
+  //     distinction already has it separately via getStatus().)
+  //   - false: the request completed a round trip and the SERVER
+  //     responded with an error (result.error populated by supabase-js
+  //     itself, not a thrown exception here) -- the RPC function ran
+  //     and errored, which for a single plpgsql function invocation
+  //     with no partial commits means nothing from that call was
+  //     written. Definitive, safe to treat as "did not happen."
+  function callRpc(fnName, payload) {
+    if (status.state !== 'connected') {
+      return Promise.resolve({ ok: false, error: 'Not signed in to STAGING.', transportFailure: true });
+    }
+    var c = getClient();
+    if (!c) return Promise.resolve({ ok: false, error: status.error || 'Not connected.', transportFailure: true });
+    return c.rpc(fnName, payload).then(function (result) {
+      if (result.error) {
+        return { ok: false, error: result.error.message, transportFailure: false };
+      }
+      return { ok: true, data: result.data };
+    }).catch(function () {
+      return { ok: false, error: 'Network error while contacting STAGING.', transportFailure: true };
+    });
+  }
+
   window.CharmStaging = {
     checkExistingSession: checkExistingSession,
     signIn: signIn,
     signOut: signOut,
     onStatusChange: onStatusChange,
     getStatus: function () { return status; },
+    callRpc: callRpc,
   };
 })();

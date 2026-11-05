@@ -30,7 +30,7 @@
 // cross-origin CDN URL, kept in a SEPARATE best-effort cache call
 // below -- see the install handler's own comment for why it must
 // never be mixed into SHELL_FILES).
-const CACHE_NAME = 'charm-checkin-v2-shell-v8';
+const CACHE_NAME = 'charm-checkin-v2-shell-v9';
 const SHELL_FILES = [
   './',
   './index.html',
